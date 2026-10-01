@@ -97,10 +97,33 @@ class VirtualMic:
         self._primed = False
         self._last_push_ts = 0.0
         self._bytes_per_ms = sample_rate * 2 * 2 / 1000
+        # ---- 诊断计数（2026-10-01 加）：这条腿过去**完全不留痕**，
+        # 用户报「译音没进 VoiceMeeter、电平表不动」时无从判断断在哪一段：
+        # 是服务端没发音频、还是发了没处写、还是写了没播出。
+        # 三个计数分别回答这三个问题，且只在真有译音时打一行，不刷噪声。
+        self._pushed_bytes = 0          # 推入缓冲的译音字节（证明「收到了」）
+        self._played_bytes = 0          # 真正从缓冲里播出去的译音字节（证明「出声了」）
+        self._silence_bytes = 0         # 欠载补的静音字节（证明「断断续续」）
+        self._ever_primed = False       # 是否起播过（起播前一直只出静音）
+        self._no_out_warned = False     # 「下游没就绪还硬推」只报一次
 
     @property
     def device_name(self) -> str:
         return self._device_name
+
+    def _output_ready(self) -> bool:
+        """下游是否真的就绪。Windows = PortAudio 流在跑；Linux 由子类改成看 pw-cat 进程。"""
+        return self._stream is not None
+
+    def _log_summary(self, prefix: str = "") -> None:
+        """关闭时打一行「译音到底有没有出声」的汇总。没有译音就一行都不打。"""
+        if not (self._pushed_bytes or self._played_bytes):
+            return
+        bpm = self._bytes_per_ms
+        print(f"[virtualmic] {prefix}译音汇总（#{self._device_index} {self._device_name}）："
+              f"推入 {self._pushed_bytes / bpm / 1000:.1f}s | 播出 {self._played_bytes / bpm / 1000:.1f}s | "
+              f"欠载补静音 {self._silence_bytes / bpm / 1000:.1f}s | "
+              f"起播={'是' if self._ever_primed else '否'}", flush=True)
 
     def open(self) -> bool:
         """打开音频流。失败返回 False 并通过 on_status 报错。"""
@@ -124,6 +147,7 @@ class VirtualMic:
 
     def close(self) -> None:
         """关闭音频流（幂等）。"""
+        self._log_summary()
         if self._stream is not None:
             try:
                 self._stream.stop()
@@ -145,7 +169,15 @@ class VirtualMic:
         """
         if not pcm_48k_stereo:
             return
+        notice = ""
         with self._lock:
+            self._pushed_bytes += len(pcm_48k_stereo)
+            if not self._output_ready() and not self._no_out_warned:
+                # 本仓库禁静默降级：音频推进来了、下游却没就绪，必须留痕 ——
+                # 否则「译音没声音」在日志里既看不到证据、也看不到原因。
+                self._no_out_warned = True
+                notice = (f"[virtualmic] ⚠️ 收到译音但下游未就绪"
+                          f"（#{self._device_index} {self._device_name}）→ 这批译音不会出声")
             self._buf.append((pcm_48k_stereo, False))
             self._buf_bytes += len(pcm_48k_stereo)
             self._last_push_ts = time.monotonic()
@@ -167,6 +199,16 @@ class VirtualMic:
                     continue
                 break
             self._maybe_prime()
+            if self._primed and not self._ever_primed and self._output_ready():
+                # 起播只报一次：这一行是「译音真的开始出声了」的唯一证据。
+                # 打印放在 push()（引擎线程）里做，绝不能在音频回调线程里 print
+                # —— RT 回调里做阻塞 IO 会造成欠载（这就是 notice 攒到锁外再打的原因）。
+                self._ever_primed = True
+                notice = (f"[virtualmic] 起播：#{self._device_index} {self._device_name}"
+                          f"（已攒 {self._buf_bytes / self._bytes_per_ms:.0f}ms，"
+                          f"推入总计 {self._pushed_bytes / self._bytes_per_ms / 1000:.1f}s）")
+        if notice:
+            print(notice, flush=True)
 
     def end_sentence(self) -> None:
         """把刚推完的音频封成**一句**（打句尾标记）。
@@ -238,8 +280,11 @@ class VirtualMic:
                 if ends:
                     self._head_started = False     # 这句播完了，下一句可以整句丢
             self._buf_bytes -= take
+        self._played_bytes += len(out)          # 真正播出去的译音（不含下面补的静音）
         if len(out) < need_bytes:
-            out.extend(b"\x00" * (need_bytes - len(out)))
+            pad = need_bytes - len(out)
+            self._silence_bytes += pad          # 欠载：下游等不到数据 → 补静音
+            out.extend(b"\x00" * pad)
         return bytes(out)
     def _audio_callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
         need_bytes = frames * 2 * 2
@@ -247,7 +292,11 @@ class VirtualMic:
             log.debug("[virtualmic] callback status: %s", status)
         with self._lock:
             self._maybe_prime()                        # 停更超时也要起播（短译音兜底）
-            if not self._primed or self._buf_bytes < need_bytes:
+            if not self._primed:
+                outdata[:] = b"\x00" * need_bytes      # 起播前出静音（设计如此）
+                return
+            if self._buf_bytes < need_bytes:
+                self._silence_bytes += need_bytes      # 起播后缓冲见底 = 欠载（听感断续）
                 outdata[:] = b"\x00" * need_bytes
                 return
             outdata[:] = self._drain(need_bytes)
@@ -332,11 +381,16 @@ class PwCatVirtualMic(VirtualMic):
         except Exception as exc:  # noqa: BLE001 — 写线程绝不能把异常抛到主线程
             log.warning("[virtualmic] 写线程退出：%s: %s", type(exc).__name__, exc)
 
+    def _output_ready(self) -> bool:
+        """Linux 侧就看 pw-cat 进程是不是还活着（父类的「流」在这里恒为 None）。"""
+        return self._proc is not None and self._proc.poll() is None
+
     def close(self) -> None:
         """幂等。顺序：停写线程 → join → 才关 pw-cat（与 loopback 采集侧同一条纪律）。"""
         if self._closed:
             return
         self._closed = True
+        self._log_summary()
         self._stop.set()
         th = self._writer
         if th is not None and th.is_alive():

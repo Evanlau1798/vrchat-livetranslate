@@ -482,6 +482,36 @@ def test_engine_marks_sentence_boundaries():
     print(f"  引擎在句子边界封句 OK（推入 {vm.pushed} 段，封句 {vm.marks} 次）")
 
 
+def test_diagnostics_counters():
+    """★ 诊断计数：推入 / 播出 / 欠载三个数必须如实记账。
+
+    为什么值得单测：用户报「译音没进 VoiceMeeter」时，日志里只有这三行能定位断点
+    （收到了？起播了？播了多少？）。计数写错 = 诊断结论写错，等于白留痕。
+    """
+    from vlt.output.virtualmic import VirtualMic
+
+    vm = VirtualMic(device_index=7, device_name="fake-vm", sample_rate=48000,
+                    buffer_ms=100, max_buffer_ms=500)
+    vm._stream = object()                      # 假装音频流已就绪（不真开设备）
+    bpm = 48000 * 2 * 2 / 1000
+    pcm = b"\x11" * int(100 * bpm)             # 100ms 立体声 s16
+    vm.push(pcm)
+    assert vm._pushed_bytes == len(pcm), f"推入字节不对：{vm._pushed_bytes}"
+    assert vm._ever_primed, "攒够 buffer_ms 就该起播（否则永远只出静音）"
+
+    block = bytearray(int(20 * bpm))           # 20ms @48k = 480 帧
+    vm._audio_callback(block, 480, None, None)
+    assert vm._played_bytes == len(block), f"播出字节不对：{vm._played_bytes} vs {len(block)}"
+    assert vm._silence_bytes == 0, "缓冲够用时不该记欠载"
+
+    for _ in range(10):                        # 把缓冲抽干
+        vm._audio_callback(bytearray(len(block)), 480, None, None)
+    assert vm._silence_bytes > 0, "起播后缓冲见底必须记成欠载"
+    assert vm._played_bytes <= vm._pushed_bytes, "播出量不可能超过推入量"
+    print(f"  诊断计数 OK（推入 {vm._pushed_bytes} / 播出 {vm._played_bytes} / "
+          f"欠载 {vm._silence_bytes} 字节）")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     print("test_virtualmic:")
@@ -499,4 +529,5 @@ if __name__ == "__main__":
     test_overflow_drops_whole_sentences_only()
     test_playing_sentence_not_dropped()
     test_engine_marks_sentence_boundaries()
+    test_diagnostics_counters()
     print("ALL PASSED")

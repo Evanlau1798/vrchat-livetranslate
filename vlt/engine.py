@@ -483,6 +483,8 @@ class Engine:
         self._silent_chunks = 0        # 其中判为静音的块数
         self._last_loud_ts = 0.0       # 最近一次"有声音"的时刻
         self._audio_chunks = 0         # 收到的 TTS 音频块数
+        self._audio_seconds = 0.0      # 收到的 TTS 音频总时长（秒，24k 单声道口径）
+        self._audio_no_sink = 0        # 收到译音却没处可写的块数（配置/设备问题，不许静默丢）
         self._text_deltas = 0          # 收到的译文本条数
         self._text_hist: deque[tuple[float, str]] = deque(maxlen=40)
         self._session_started_at = 0.0
@@ -730,7 +732,17 @@ class Engine:
             pass
         try:
             if self._virtualmic is not None:
-                self._virtualmic.close()
+                # 译音这条腿的总结论：收到多少、有没有处可写、播出去多少。
+                # 用户报「译音没进 VoiceMeeter」时，下面两行就能直接定位断点。
+                if self._audio_chunks or self._audio_no_sink:
+                    print(f"[engine] {self._direction} 译音汇总：收到 {self._audio_chunks} 段"
+                          f" ≈ {self._audio_seconds:.1f}s｜无输出丢弃 {self._audio_no_sink} 段",
+                          flush=True)
+                else:
+                    print(f"[engine] ⚠️ {self._direction} 译音输出开着，但本会话服务端"
+                          f"一段音频都没发（同期收到译文本 {self._text_deltas} 条）"
+                          f"→ 「译音没声音」的原因在这一层（会话没要到音频）", flush=True)
+                self._virtualmic.close()      # 关闭时它自己再打一行「推入/播出/欠载」
                 self._virtualmic = None
         except Exception:
             pass
@@ -780,6 +792,12 @@ class Engine:
 
     async def _build_and_run(self) -> None:
         scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
+        # 留痕：这次会话到底向服务端**要了什么**（译音是 text+audio 还是纯 text）。
+        # 为什么必须打：这条腿过去在日志里完全看不到「要没要音频」，用户报
+        # 「译音没进 VoiceMeeter」时无从分辨是「服务端没发」还是「发了没出声」。
+        print(f"[engine] {self._direction} 会话请求：输出="
+              f"{'text+audio' if scfg.output_audio else 'text'} | 音色={scfg.voice} | "
+              f"{scfg.source_lang or '自动'}→{scfg.target_lang}", flush=True)
 
         if "chatbox" in self._sinks and not self._chatbox_wanted:
             msg = ("chatbox 只发『我说的话』的译文"
@@ -1085,8 +1103,21 @@ class Engine:
 
     def _on_audio(self, pcm: bytes) -> None:
         if self._virtualmic is None:
+            # 服务端发了译音，但没有可写的虚拟声卡（没勾「译音输出」/ 设备不可用）→ 丢弃。
+            # 本仓库禁静默降级：这条路径以前一声不吭，用户报「译音没声音」时
+            # 日志里既没有「收到了」也没有「丢掉了」，只能靠猜。
+            self._audio_no_sink += 1
+            if self._audio_no_sink == 1:
+                print(f"[engine] ⚠️ {self._direction} 收到译音音频但译音输出未开/不可用 → 丢弃"
+                      f"（勾选「译音输出」且虚拟声卡可用才会出声）", flush=True)
             return
         self._audio_chunks += 1
+        self._audio_seconds += len(pcm) / 2 / 24000
+        if self._audio_chunks == 1:
+            # 首段译音是「服务端确实发了音频」的第一手证据（只打一次，不刷屏）。
+            print(f"[engine] {self._direction} 译音：收到第 1 段"
+                  f"（{len(pcm)}B ≈ {len(pcm) / 2 / 24000:.2f}s，24k 单声道）"
+                  f"→ 写入虚拟声卡 {self._virtualmic.device_name}", flush=True)
         stereo = resample_24k_mono_to_48k_stereo(pcm)
         # 句子边界（两条触发，缺一不可）：
         # ① 上一句的终版文本已到 → 现在这段音频属于新的一句；
