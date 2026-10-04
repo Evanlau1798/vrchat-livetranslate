@@ -420,4 +420,7 @@ STRINGS: dict[str, str] = {
     "桌面字幕位置已记住": "Desktop subtitle position saved",
     "（字幕窗默认可穿透，先解锁再拖）":
         "(the window ignores clicks by default — unlock first, then drag)",
+    "缩放": "Scale",
+    "（字号与面板一起缩放，改完即时生效）":
+        "(scales text and panel together; takes effect immediately)",
 }

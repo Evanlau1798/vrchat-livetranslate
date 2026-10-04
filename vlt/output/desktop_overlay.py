@@ -58,6 +58,13 @@ BACKENDS = ("auto", "native", "tk", "wayland", "x11")
 
 ALPHA_MIN, ALPHA_MAX, ALPHA_DEFAULT = 0.2, 1.0, 0.9
 
+# 「缩放」：字号与面板尺寸**一起**放大/缩小（1080p 上看着正常、4K 上字太小的正解 ——
+# 只放大字号不放大面板会把面板撑爆，只放大面板不放大字号看着还是小）。
+# 范围取「还能用」的两端：0.5× 面板 512x180、2.0× 2048x720。
+SCALE_MIN, SCALE_MAX, SCALE_DEFAULT = 0.5, 2.0, 1.0
+# 缩放后仍要守住的底线（极端基础值 × 极端缩放也不要出现 0 尺寸 / 看不见的字）
+PANEL_MIN_PX, FONT_MIN_PX = 160, 10
+
 # 锚点 → (水平, 垂直) 的**分子**（分母恒为 2）：0=贴起始边、1=居中、2=贴结束边。
 # 用整数分数而不是 0.5 浮点，是为了让结果与面板/窗口尺寸的奇偶无关（不会出现 .5 抖动）。
 _ANCHOR_GRID: dict[str, tuple[int, int]] = {
@@ -88,6 +95,7 @@ class DesktopOverlayConfig:
     pos: tuple[int, int] = (80, 80)       # attach_to_game=False / anchor="free" 时的屏幕坐标
     size_px: tuple[int, int] = (1024, 360)
     alpha: float = ALPHA_DEFAULT          # 整窗透明度（用户要的「可改透明度」），0.2~1.0
+    scale: float = SCALE_DEFAULT          # 字号+面板一起缩放（在 from_dict 解析后统一施加）
     click_through: bool = True            # 鼠标穿透（拖动时临时关掉）
     follow: bool = True                   # 游戏窗口移动/缩放时跟随
     game_title: str = "VRChat"
@@ -165,6 +173,17 @@ class DesktopOverlayConfig:
             max_lines=vis("max_lines", base.max_lines, _as_int),
             show_source=bool(vis("show_source", base.show_source, _as_bool)),
         )
+        # 「缩放」在**解析之后**统一施加：config.yaml 里的 size_px / font_size 仍按基础值写，
+        # 用户来回拖缩放不会把基础值越乘越大（只有 scale 这一个键被写盘）。
+        # 只认本段：`overlay` 段没有 scale 语义，继承过来会让手腕屏的配置影响桌面字幕。
+        scale = clamp_scale(own("scale", base.scale))
+        if scale != 1.0:
+            w, h = cfg.size_px
+            cfg.size_px = (max(PANEL_MIN_PX, round(w * scale)),
+                           max(PANEL_MIN_PX, round(h * scale)))
+            cfg.font_size = max(FONT_MIN_PX, round(cfg.font_size * scale))
+            cfg.source_font_size = max(FONT_MIN_PX, round(cfg.source_font_size * scale))
+        cfg.scale = scale
         merged = dict(visual)
         for key in DesktopOverlayConfig._OVERRIDE_KEYS:
             if d.get(key) is not None:
@@ -220,6 +239,10 @@ def _as_int(raw: Any) -> int:
     return int(raw)
 
 
+def _as_float(raw: Any) -> float:
+    return float(raw)
+
+
 def _as_str(raw: Any) -> str:
     return str(raw)
 
@@ -241,6 +264,21 @@ def clamp_alpha(a: Any) -> float:
     if v != v:                                  # NaN
         return ALPHA_DEFAULT
     return max(ALPHA_MIN, min(ALPHA_MAX, v))
+
+
+def clamp_scale(s: Any) -> float:
+    """整体缩放夹到 0.5~2.0；非法值（None / "abc" / NaN）回落 1.0（= 不缩放）。
+
+    与 clamp_alpha 同一个口径：配置是用户手改的，值是垃圾就**说出来**再回落。
+    """
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        print(f"[desktop] ⚠️ 配置项 scale={s!r} 不合法 → 用默认值 {SCALE_DEFAULT}")
+        return SCALE_DEFAULT
+    if v != v:                                  # NaN
+        return SCALE_DEFAULT
+    return max(SCALE_MIN, min(SCALE_MAX, v))
 
 
 def _clamp_into_area(x: int, y: int, w: int, h: int,

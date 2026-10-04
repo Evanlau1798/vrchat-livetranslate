@@ -573,6 +573,8 @@ class TranslationGUI:
         # 落盘调到，只有这个标志为真才写 alpha —— 否则用户只是拖了个位置，
         # 滑块上那个（可能是继承来的 / 默认的）值就被写进配置，透明度悄悄变了。
         self._desktop_alpha_touched = False
+        # 缩放滑块同理：只有用户真的拖过才把 `desktop_overlay.scale` 写进配置。
+        self._desktop_scale_touched = False
         self._specs: list[tuple] = []
         self._sinks: set[str] = set()
         self._pending_starts = 0
@@ -1519,7 +1521,7 @@ class TranslationGUI:
         #    （desktop_overlay.alpha → overlay.alpha → 默认值）。只读本段的 alpha 会让
         #    「overlay.alpha=0.5 且没写 desktop_overlay.alpha」的用户看到滑块停在 0.90、
         #    而窗口其实是 0.50 —— 更糟的是碰一下滑块就把 0.90 写回配置（透明度突然变了）。
-        from .output.desktop_overlay import DesktopOverlayConfig
+        from .output.desktop_overlay import SCALE_MAX, SCALE_MIN, DesktopOverlayConfig
         _dcfg = DesktopOverlayConfig.from_dict(self._desktop_cfg(),
                                                visual=self._cfg.overlay or {})
         drow = ttk.Frame(self._tune_body)
@@ -1542,6 +1544,30 @@ class TranslationGUI:
             command=self._toggle_desktop_drag)
         self._desktop_drag_btn.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(drow, text=t("（字幕窗默认可穿透，先解锁再拖）"), font=FONT_STATUS,
+                  foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(8, 0))
+
+        # 「缩放」：一次把**字号与面板**一起放大/缩小 —— 「1080p 上看着正常、4K 上字太小」
+        # 正是这一条要解决的（只放大字号不放大面板会把面板撑爆，只放大面板不放大字号
+        # 看着还是小）。与透明度同一条落盘路径：写 `desktop_overlay.scale`，
+        # 字幕窗下一跳（50ms）热重载 —— 拖完 300ms 生效，不用重启。
+        srow = ttk.Frame(self._tune_body)
+        srow.pack(fill=tk.X, pady=(2, 2))
+        ttk.Label(srow, text=t("缩放"), font=FONT_UI).pack(side=tk.LEFT)
+        self._desktop_scale_var = tk.DoubleVar(value=float(_dcfg.scale))
+        _scale_txt = f"{self._desktop_scale_var.get():.2f}×"
+        # ⚠️ 宽度必须按文案实测换算（width=N 的单位是字体平均字符宽，而 `×` 不是数字宽）：
+        #    最小值给 8 —— test_i18n 的「固定宽度控件会裁字」守卫是在 **Linux runner 的
+        #    字体**下量 '1.00×'（量出来 7），本机 Windows 字体量出来只有 6，写死 6 必红。
+        self._desktop_scale_lbl = ttk.Label(srow, text=_scale_txt, font=FONT_STATUS,
+                                            foreground=TEXT_DIM,
+                                            width=_char_width_for(_scale_txt, FONT_UI, 8))
+        tk.Scale(srow, from_=SCALE_MIN, to=SCALE_MAX, resolution=0.05, orient=tk.HORIZONTAL,
+                 variable=self._desktop_scale_var, showvalue=False, length=104, width=10,
+                 bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
+                 highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
+                 command=self._on_desktop_scale).pack(side=tk.LEFT, padx=(4, 6))
+        self._desktop_scale_lbl.pack(side=tk.LEFT)
+        ttk.Label(srow, text=t("（字号与面板一起缩放，改完即时生效）"), font=FONT_STATUS,
                   foreground=TEXT_MUTED).pack(side=tk.LEFT, padx=(8, 0))
 
     def _current_anchor(self) -> str:
@@ -4360,6 +4386,19 @@ class TranslationGUI:
             self._desktop_out.set_alpha(a)
         self._schedule_desktop_save()
 
+    def _on_desktop_scale(self, _v: str = "") -> None:
+        """缩放滑块：落到 `desktop_overlay.scale`，由字幕窗热重载生效（字号 + 面板一起变）。
+
+        不在这里直接改窗口：scale 是**解析期**参数（在 `from_dict` 里施加），
+        窗口那侧只能靠 config.yaml 热重载 —— 写盘 300ms 去抖 + 下一跳 50ms，足够跟手。
+        """
+        self._desktop_scale_touched = True
+        s = float(self._desktop_scale_var.get())
+        lbl = getattr(self, "_desktop_scale_lbl", None)
+        if lbl is not None:
+            lbl.configure(text=f"{s:.2f}×")
+        self._schedule_desktop_save()
+
     def _schedule_desktop_save(self) -> None:
         if self._desktop_save_job is not None:
             try:
@@ -4387,9 +4426,15 @@ class TranslationGUI:
         try:
             text = p.read_text(encoding="utf-8")
             updates: list[tuple[list[str], str]] = []
+            mem: dict[str, Any] = {}
             if self._desktop_alpha_touched:
-                updates.append((["desktop_overlay", "alpha"],
-                                _fmt_scalar(float(self._desktop_alpha_var.get()))))
+                a = float(self._desktop_alpha_var.get())
+                updates.append((["desktop_overlay", "alpha"], _fmt_scalar(a)))
+                mem["alpha"] = a
+            if self._desktop_scale_touched:
+                s = round(float(self._desktop_scale_var.get()), 2)
+                updates.append((["desktop_overlay", "scale"], _fmt_scalar(s)))
+                mem["scale"] = s
             if self._desktop_out is not None:
                 for key, val in (self._desktop_out.snap_to_config() or {}).items():
                     if key in ("offset", "pos"):
@@ -4401,6 +4446,12 @@ class TranslationGUI:
             for key_path, value in updates:
                 text = _yaml_set_or_create(text, key_path, value)
             _write_config_text(p, text)
+            # 同步内存快照：`_start_desktop()` 是按 `self._cfg` 建窗的，不同步的话
+            # 「关掉桌面字幕再勾上」会用旧值重建窗口（OSC 端口那条设置同一个道理）。
+            if mem:
+                if not isinstance(self._cfg.desktop_overlay, dict):
+                    self._cfg.desktop_overlay = {}
+                self._cfg.desktop_overlay.update(mem)
             print("[gui] 桌面字幕参数已写入 config.yaml："
                   + " ".join(f"{'/'.join(k)}={v}" for k, v in updates), flush=True)
         except Exception as exc:  # noqa: BLE001
