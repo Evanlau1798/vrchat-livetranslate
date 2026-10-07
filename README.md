@@ -54,6 +54,26 @@ Linux 的安装与用法：**[GUIDE.linux.md](docs/GUIDE.linux.md)** ·
 
 ## 📖 使用指南
 
+### ChatGPT 訂閱語音（原始碼預覽）
+
+新增「ChatGPT 訂閱語音」路徑，已實測中文語音 → 日文字幕及日文譯音。
+此路徑使用官方 Codex CLI 的訂閱語音連線，不需要 OpenAI API key；模型由服務端選擇，
+不能把它當成通用 API Credit，也不保證指定 `gpt-live` 型號可用。
+
+1. 安裝本專案的原始碼依賴、官方 Codex CLI，以及 Chrome 或 Edge。
+2. 額外安裝：`.venv\Scripts\python.exe -m pip install -r requirements-chatgpt.txt`。
+3. 開啟 GUI，在設定切換至「ChatGPT 訂閱語音」，按「登入 ChatGPT」完成瀏覽器登入。
+   已執行 `codex login` 的帳戶可以直接使用。
+4. 選擇「我說」及中文 → 日本語，開始翻譯。需要讓 VRChat 玩家聽見日文時，
+   開啟「譯音輸出」，設定虛擬聲卡，並在 VRChat 選擇其錄音端作為麥克風。
+
+目前支援單向語音翻譯，使用 Juniper 聲音；打字翻譯、Qwen 聲音預聽及雙向模式不適用。
+語音連線會啟動隔離的背景 Chromium，停止翻譯時清理；不使用主瀏覽器的個人資料。
+可用性及額度取決於登入帳戶與 Codex 語音服務。現有下載版 exe 尚未包含此預覽功能。
+
+驗證命令：`.venv\Scripts\python.exe scripts/verify/verify_chatgpt_live.py`，
+只傳送專案的中文測試錄音，不開啟麥克風；結果及日文 WAV 存在 `out/chatgpt-ja/`。
+
 从**快速上手**到**已知限制**的完整内容（安装、API key、用法、配置、排障、项目结构、开发）都在单独文档里：
 
 - **Windows** → **[使用指南（docs/GUIDE.md）](docs/GUIDE.md)**

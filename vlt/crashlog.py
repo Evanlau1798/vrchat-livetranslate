@@ -401,14 +401,6 @@ def log_startup_info(tag: str = "") -> None:
               f"{' + 有未提交改动' if dirty else ''}")
     except Exception as exc:
         print(f"[startup] git 信息读取失败：{exc}")
-    try:
-        from .config import load_api_key
-        k = load_api_key()
-        print(f"[startup] API 密钥：{k[:6]}****{k[-4:]}（{len(k)} 字符）")
-    except SystemExit as exc:
-        print(f"[startup] API 密钥：未配置（{exc}）")
-    except Exception as exc:
-        print(f"[startup] API 密钥：读取失败 {exc}")
     print("=" * 64)
 
 
