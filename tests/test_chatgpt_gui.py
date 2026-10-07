@@ -17,6 +17,10 @@ class GuiTests(unittest.TestCase):
     def setUp(self):
         sandbox_config(reset=True)
         i18n.set_language('zh')
+        # 此檔只驗 Tk 控制項；原生登入快取探測由登入／RPC 測試涵蓋。
+        checker = patch('vlt.gui_chatgpt._run_auth')
+        checker.start()
+        self.addCleanup(checker.stop)
 
     def test_saved_subscription_startup_never_reads_qwen_credentials(self):
         path = sandbox_config()

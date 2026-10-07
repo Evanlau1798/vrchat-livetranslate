@@ -1,17 +1,54 @@
 """JSON-RPC 的有界等待、工具拒絕及隱私邊界。"""
 import asyncio
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vlt.session.codex_rpc import CodexRPC
+from vlt.session.codex_rpc import CodexRPC, login_chatgpt
 
 
 class RPCTests(unittest.IsolatedAsyncioTestCase):
+    async def test_login_and_voice_isolate_credentials_without_mutating_parent(self):
+        from vlt import paths
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            shared = root / 'shared'
+            shared.mkdir()
+            sentinel = shared / 'auth.json'
+            sentinel.write_text('parent credentials', encoding='utf-8')
+            inherited = dict(os.environ, CODEX_HOME=str(shared),
+                             OPENAI_API_KEY='parent-api', CODEX_API_KEY='parent-codex',
+                             CODEX_ACCESS_TOKEN='parent-access')
+            process = SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))
+            spawn = AsyncMock(return_value=process)
+            with patch.dict(os.environ, inherited, clear=True), \
+                 patch.object(paths, '_user_data_dir', return_value=root / 'app'), \
+                 patch('vlt.session.codex_rpc.codex_command', return_value=['fake-codex']), \
+                 patch('asyncio.create_subprocess_exec', spawn):
+                await login_chatgpt()
+                rpc = CodexRPC(lambda _: None)
+                rpc._read = AsyncMock()
+                rpc.request = AsyncMock()
+                rpc._send = AsyncMock()
+                await rpc.start(str(root))
+                await rpc.close()
+                self.assertEqual(dict(os.environ), inherited)
+            for call in spawn.call_args_list:
+                self.assertIn('cli_auth_credentials_store="file"', call.args)
+                self.assertIn('forced_login_method="chatgpt"', call.args)
+                env = call.kwargs.get('env', {})
+                self.assertEqual(env.get('CODEX_HOME'), str(root / 'app' / 'codex'))
+                for name in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'):
+                    self.assertNotIn(name, env)
+            self.assertEqual(sentinel.read_text(encoding='utf-8'), 'parent credentials')
+            self.assertTrue((root / 'app' / 'codex').is_dir())
+
     async def test_timeout_names_the_failed_method_and_clears_pending(self):
         rpc = CodexRPC(lambda _: None)
         rpc._send = AsyncMock()

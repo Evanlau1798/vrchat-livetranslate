@@ -355,6 +355,8 @@ class TranslationGUI(ProxyMethods):
         self._power_state = state
         gui_layout.apply_power_state(getattr(self, "_power_btn", None), state)
     def _start(self):
+        if getattr(self, '_chatgpt_login_busy', False) and gui_chatgpt.uses_chatgpt(self):
+            self._set_status('info', t('ChatGPT 登入仍在進行，請完成瀏覽器中的登入。')); return
         self._sync_engine_ctx()
         need_key = gui_engine.start(self._engine_ctx)
         self._unsync_engine_ctx()

@@ -1,10 +1,11 @@
 """ChatGPT 訂閱路徑：設定、工廠與 GUI 不可要求或轉送 Qwen API key。"""
 import sys
+import queue
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vlt.config import load_config
@@ -52,17 +53,37 @@ class IntegrationTests(unittest.TestCase):
             start_engine.assert_called_once_with(ctx, 0)
         self.assertEqual(typed, [False])
 
-    def test_subscription_dual_is_rejected_before_start(self):
+    def test_subscription_dual_starts_two_directions_with_separate_outputs(self):
         variable = lambda value: SimpleNamespace(get=lambda: value)
-        messages = []
+        messages, typed = [], []
+        root = Mock()
         ctx = gui_engine.EngineCtx(
-            cfg=SimpleNamespace(session_base={'provider': 'chatgpt', 'api_key': ''}),
-            direction_var=variable('dual'), set_status_fn=lambda level, text: messages.append((level, text)),
+            cfg=SimpleNamespace(session_base={'provider': 'chatgpt', 'api_key': ''}, directions={}, output={}),
+            direction_var=variable('dual'), chatbox_var=variable(True), vmic_var=variable(True),
+            lang_pair={'source': 'zh', 'target': 'ja'}, root=root, q=queue.Queue(),
+            on_engine_text_fn=lambda *args: messages.append(args),
+            set_text_input_enabled_fn=typed.append,
         )
-        with patch.object(gui_engine, 'start_engine') as start:
-            gui_engine.start(ctx)
-            start.assert_not_called()
-        self.assertIn('單向', messages[-1][1])
+        with patch.object(gui_engine, 'Engine') as engine, \
+             patch.object(gui_engine, 'start_overlay'), patch.object(gui_engine, 'start_desktop'):
+            self.assertFalse(gui_engine.start(ctx))
+            self.assertEqual(engine.call_count, 1, 'first direction never starts')
+            root.after.call_args.args[1]()  # 既有 300ms 排程啟動第二個方向。
+            self.assertEqual(engine.call_count, 2)
+        self.assertEqual(ctx.engine_dirs, ['mine', 'theirs'])
+        self.assertEqual(ctx.pending_starts, 0)
+        mine, theirs = (call.kwargs for call in engine.call_args_list)
+        self.assertEqual((mine['source'], theirs['source']), ('mic', 'loopback'))
+        self.assertEqual(mine['sinks'], {'chatbox'})
+        self.assertEqual(theirs['sinks'], set())
+        self.assertEqual((ctx.cfg.directions['mine'].source_lang, ctx.cfg.directions['mine'].target_lang), ('zh', 'ja'))
+        self.assertEqual((ctx.cfg.directions['theirs'].source_lang, ctx.cfg.directions['theirs'].target_lang), ('ja', 'zh'))
+        self.assertTrue(ctx.cfg.directions['mine'].output_audio)
+        self.assertFalse(ctx.cfg.directions['theirs'].output_audio)
+        mine['events'].on_text('中文', '日本語', True)
+        theirs['events'].on_text('日本語', '繁體中文', True)
+        self.assertEqual([entry[:2] for entry in messages], [('mine', 'mic'), ('theirs', 'loopback')])
+        self.assertEqual(typed, [False])
 
 
 if __name__ == '__main__':

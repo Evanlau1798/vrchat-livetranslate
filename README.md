@@ -63,11 +63,17 @@ Linux 的安装与用法：**[GUIDE.linux.md](docs/GUIDE.linux.md)** ·
 1. 安裝本專案的原始碼依賴、官方 Codex CLI，以及 Chrome 或 Edge。
 2. 額外安裝：`.venv\Scripts\python.exe -m pip install -r requirements-chatgpt.txt`。
 3. 開啟 GUI，在設定切換至「ChatGPT 訂閱語音」，按「登入 ChatGPT」完成瀏覽器登入。
-   已執行 `codex login` 的帳戶可以直接使用。
+   本工具使用獨立登入，首次使用需在介面登入；本機 `codex login` 不會自動共用。
+   登入完成後顯示「ChatGPT 已登入」，按鈕改為「切換 ChatGPT 帳戶」。
+   憑證由官方 CLI 儲存在使用者資料目錄的 `vrchat-livetranslate/codex/`，
+   Windows 為 `%APPDATA%\vrchat-livetranslate\codex\`；換帳戶不修改日常 Codex 登入。
 4. 選擇「我說」及中文 → 日本語，開始翻譯。需要讓 VRChat 玩家聽見日文時，
    開啟「譯音輸出」，設定虛擬聲卡，並在 VRChat 選擇其錄音端作為麥克風。
+   選「雙向同時」可同時將你的中文轉成日文、將對方的日文轉成繁體中文字幕；
+   日文譯音只從「我說」方向送往虛擬麥克風，對方方向不輸出聲音。
 
-目前支援單向語音翻譯，使用 Juniper 聲音；打字翻譯、Qwen 聲音預聽及雙向模式不適用。
+支援單向及雙向語音翻譯，使用 Juniper 聲音；打字翻譯與 Qwen 聲音預聽不適用。
+雙向模式會建立兩條獨立語音連線，兩個方向各自使用訂閱額度。
 語音連線會啟動隔離的背景 Chromium，停止翻譯時清理；不使用主瀏覽器的個人資料。
 可用性及額度取決於登入帳戶與 Codex 語音服務。現有下載版 exe 尚未包含此預覽功能。
 

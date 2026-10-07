@@ -1,4 +1,4 @@
-"""Codex app-server JSON-RPC；沿用 CLI 登入，不讀取或複製 token。"""
+"""Codex app-server JSON-RPC；工具專屬登入，不讀取或複製 token。"""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +7,8 @@ import os
 import platform
 import shutil
 from pathlib import Path
+
+from .. import paths
 
 
 def codex_command() -> list[str]:
@@ -26,6 +28,30 @@ def codex_command() -> list[str]:
     return [str(path)]
 
 
+async def _spawn_codex(*args, **kwargs):
+    # 使用者資料目錄與原始碼／portable 目錄分開，憑證不落入專案。
+    home = paths._user_data_dir() / 'codex'
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    env = dict(os.environ, CODEX_HOME=str(home))
+    for name in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'):
+        env.pop(name, None)
+    return await asyncio.create_subprocess_exec(
+        *codex_command(), '-c', 'cli_auth_credentials_store="file"',
+        '-c', 'forced_login_method="chatgpt"', *args, env=env,
+        **kwargs, **({'creationflags': 0x08000000} if os.name == 'nt' else {}),
+    )
+
+
+async def _stop_process(process):
+    if process and process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), 3)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+
+
 class CodexRPC:
     def __init__(self, on_event):
         self.on_event = on_event
@@ -37,11 +63,10 @@ class CodexRPC:
         self.closing = False
 
     async def start(self, cwd: str):
-        self.process = await asyncio.create_subprocess_exec(
-            *codex_command(), '--enable', 'realtime_conversation', 'app-server', '--stdio',
+        self.process = await _spawn_codex(
+            '--enable', 'realtime_conversation', 'app-server', '--stdio',
             cwd=cwd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024,
-            **({'creationflags': 0x08000000} if os.name == 'nt' else {}),
         )
         self.reader = asyncio.create_task(self._read())
         await self.request('initialize', {
@@ -102,32 +127,30 @@ class CodexRPC:
 
     async def close(self):
         self.closing = True
-        if self.process and self.process.returncode is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), 3)
-            except asyncio.TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+        await _stop_process(self.process)
         if self.reader:
             self.reader.cancel()
             await asyncio.gather(self.reader, return_exceptions=True)
 
 
 async def login_chatgpt():
-    """使用官方 CLI 的瀏覽器登入，不在應用程式內儲存憑證。"""
-    process = await asyncio.create_subprocess_exec(
-        *codex_command(), 'login', stdout=asyncio.subprocess.DEVNULL,
+    """官方 CLI 將登入儲存在工具專屬 CODEX_HOME。"""
+    process = await _spawn_codex(
+        'login', stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
-        **({'creationflags': 0x08000000} if os.name == 'nt' else {}),
     )
     try:
         return await asyncio.wait_for(process.wait(), 180) == 0
     finally:
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 3)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        await _stop_process(process)
+
+
+async def chatgpt_logged_in():
+    """只檢查官方 CLI 的本機登入快取，不讀取 token 或呼叫模型。"""
+    process = await _spawn_codex('login', 'status', stdout=asyncio.subprocess.PIPE,
+                                 stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+        return process.returncode == 0 and b'ChatGPT' in stdout + stderr
+    finally:
+        await _stop_process(process)

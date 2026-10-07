@@ -114,10 +114,6 @@ def start(ctx: EngineCtx) -> bool:
     if ctx.refresh_api_key_fn:
         ctx.refresh_api_key_fn()
     chatgpt = ctx.cfg.session_base.get("provider") == endpoints.PROVIDER_CHATGPT
-    if chatgpt and ctx.direction_var.get() == "dual":
-        if ctx.set_status_fn:
-            ctx.set_status_fn("warn", t("ChatGPT 訂閱語音目前支援單向翻譯，請選擇「我說」或「別人說」。"))
-        return
     if not chatgpt and not (ctx.cfg.session_base.get("api_key") or "").strip():
         # 没 key 就别白连一次（会撞 401），直接把用户送到填 key 的地方
         if ctx.set_status_fn:
