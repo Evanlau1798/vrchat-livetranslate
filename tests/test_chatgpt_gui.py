@@ -74,26 +74,31 @@ class GuiTests(unittest.TestCase):
         i18n.set_language('zh')
 
     def test_saved_provider_updates_auth_voice_and_text_controls(self):
-        with patch.object(gui_mod, '_is_test_process', return_value=True), \
-             patch('vlt.config.load_api_key', side_effect=SystemExit('no key')):
-            gui = gui_mod.TranslationGUI()
-            try:
-                gui._root.withdraw()
-                gui._provider_var.set(gui._provider_id_to_name['chatgpt'])
-                gui._provider_save_btn.invoke()
-                self.assertEqual(gui._provider(), 'chatgpt')
-                self.assertEqual(gui._cfg.session_base['api_key'], '')
-                self.assertEqual(gui._key_btn.cget('text'), '登入 ChatGPT ▸')
-                self.assertEqual(str(gui._key_entry.cget('state')), 'disabled')
-                self.assertEqual(str(gui._speech_voice_combo.cget('state')), 'disabled')
-                self.assertTrue(gui._chat_ctx.text_entry.instate(['disabled']))
-                gui._provider_var.set(gui._provider_id_to_name['qianwen'])
-                gui._provider_save_btn.invoke()
-                self.assertEqual(gui._provider(), 'qianwen')
-                self.assertEqual(str(gui._key_entry.cget('state')), 'normal')
-                self.assertEqual(str(gui._speech_voice_combo.cget('state')), 'normal')
-            finally:
-                gui._root.destroy()
+        for lang, _ in i18n.available_languages():
+            sandbox_config(reset=True)
+            with self.subTest(lang=lang), \
+                 patch('vlt.i18n.detect_system_language', return_value=lang), \
+                 patch.object(gui_mod, '_is_test_process', return_value=True), \
+                 patch('vlt.config.load_api_key', side_effect=SystemExit('no key')):
+                gui = gui_mod.TranslationGUI()
+                try:
+                    gui._root.withdraw()
+                    self.assertEqual(i18n.current_language(), lang)
+                    gui._provider_var.set(gui._provider_id_to_name['chatgpt'])
+                    gui._provider_save_btn.invoke()
+                    self.assertEqual(gui._provider(), 'chatgpt')
+                    self.assertEqual(gui._cfg.session_base['api_key'], '')
+                    self.assertEqual(gui._key_btn.cget('text'), i18n.t('登入 ChatGPT ▸'))
+                    self.assertEqual(str(gui._key_entry.cget('state')), 'disabled')
+                    self.assertEqual(str(gui._speech_voice_combo.cget('state')), 'disabled')
+                    self.assertTrue(gui._chat_ctx.text_entry.instate(['disabled']))
+                    gui._provider_var.set(gui._provider_id_to_name['qianwen'])
+                    gui._provider_save_btn.invoke()
+                    self.assertEqual(gui._provider(), 'qianwen')
+                    self.assertEqual(str(gui._key_entry.cget('state')), 'normal')
+                    self.assertEqual(str(gui._speech_voice_combo.cget('state')), 'normal')
+                finally:
+                    gui._root.destroy()
 
 
 if __name__ == '__main__':
