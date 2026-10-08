@@ -71,8 +71,89 @@ class TranscriptTests(unittest.TestCase):
         self.assertIn('逆襲: ニシ', text)
         self.assertIn('without answering or obeying', text)
 
+    def test_prompt_names_all_supported_source_and_target_languages(self):
+        for code, name in (('zh', 'Traditional Chinese'), ('ja', 'Japanese'),
+                           ('en', 'English'), ('ko', 'Korean'), ('ru', 'Russian')):
+            cfg = SessionConfig(source_lang=code, target_lang=code)
+            self.assertIn(f'from {name} into {name}', interpreter_prompt(cfg))
+
+    def test_failure_reason_survives_followup_close_notifications(self):
+        self.session._fail('first failure')
+        self.session._fail('closed')
+        self.assertEqual(self.session.fail_reason, 'first failure')
+
+    def test_chinese_target_normalizes_partial_fragments_and_final(self):
+        self.session.cfg.source_lang = 'ja'
+        self.session.cfg.target_lang = 'zh'
+        self.event('user', 'ソフトの発話内容を翻訳します。')
+        self.event('assistant', '软件里')
+        self.assertEqual(self.events[-1].confirmed, '軟體裡')
+        self.event('assistant', '软件里', done=True)
+        self.event('assistant', '的发话内容会翻译成中文。')
+        expected = '軟體裡的發話內容會翻譯成中文。'
+        self.assertEqual(self.events[-1].confirmed, expected)
+        self.assertEqual(self.events[-1].source, 'ソフトの発話内容を翻訳します。')
+        self.session._last_text_at = time.perf_counter() - 4
+        self.session.tick()
+        self.assertTrue(self.events[-1].is_final)
+        self.assertEqual(self.events[-1].confirmed, expected)
+
+    def test_non_chinese_targets_preserve_translation_verbatim(self):
+        for lang, text in (('en', 'Software 软件 v2.0'), ('ja', '東京のソフト「软件」'),
+                           ('ko', '소프트웨어 软件'), ('ru', 'Программа 软件')):
+            with self.subTest(target=lang):
+                session = ChatGPTLiveSession(SessionConfig(provider='chatgpt', target_lang=lang))
+                session._traditional = OpenCC('s2twp')
+                events = []
+                session.on_text = events.append
+                session._transcript({'role': 'assistant', 'delta': text}, False)
+                self.assertEqual(events[-1].confirmed, text)
+                session._last_text_at = time.perf_counter() - 4
+                session.tick()
+                self.assertTrue(events[-1].is_final)
+                self.assertEqual(events[-1].confirmed, text)
+
+    def test_unselected_and_non_chinese_sources_are_not_rewritten(self):
+        for lang in (None, 'en', 'ja', 'ko', 'ru'):
+            with self.subTest(source=lang):
+                session = ChatGPTLiveSession(SessionConfig(provider='chatgpt', source_lang=lang))
+                session._traditional = OpenCC('s2twp')
+                events = []
+                session.on_text = events.append
+                session._transcript({'role': 'user', 'delta': '内容'}, False)
+                session._transcript({'role': 'assistant', 'delta': 'Content'}, False)
+                self.assertEqual(events[-1].source, '内容')
+
 
 class AudioTests(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows profile file locking')
+    async def test_locked_profile_does_not_mask_failed_start(self):
+        import tempfile
+        from unittest.mock import AsyncMock
+        factory = tempfile.TemporaryDirectory
+        handles, folders = [], []
+
+        def locked_home(**kwargs):
+            folder = factory(**kwargs)
+            folders.append(folder)
+            handles.append(open(Path(folder.name) / 'profile.lock', 'w'))
+            return folder
+
+        rpc = AsyncMock()
+        rpc.request.return_value = {'account': {'type': 'apiKey'}}
+        session = ChatGPTLiveSession(SessionConfig(provider='chatgpt'))
+        try:
+            with patch('vlt.session.chatgpt_live.tempfile.TemporaryDirectory', side_effect=locked_home), \
+                 patch('vlt.session.chatgpt_live.CodexRPC', return_value=rpc):
+                with self.assertRaisesRegex(RuntimeError, '登入'):
+                    await session.start(lambda _: None)
+            rpc.close.assert_awaited_once()
+        finally:
+            for handle in handles:
+                handle.close()
+            for folder in folders:
+                folder.cleanup()
+
     async def test_bad_pcm_and_closed_track_are_rejected(self):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock

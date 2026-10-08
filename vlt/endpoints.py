@@ -62,7 +62,7 @@ DEFAULT_PROVIDER = PROVIDER_QIANWEN
 _PROVIDER_CN = {
     PROVIDER_QIANWEN: "千问云",
     PROVIDER_QWENCLOUD: "千问云·海外版",
-    PROVIDER_CHATGPT: "ChatGPT 訂閱語音",
+    PROVIDER_CHATGPT: "ChatGPT 订阅语音",
 }
 
 # 已下线线路的别名 → 现行线路。老 config.yaml 里可能写着 `bailian_intl`：

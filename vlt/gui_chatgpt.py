@@ -29,14 +29,14 @@ def refresh_key_status(gui):
         _run_auth(gui, login=False)
     authenticated = getattr(gui, '_chatgpt_authenticated', False)
     if getattr(gui, '_chatgpt_login_busy', False):
-        message = t('正在確認 ChatGPT 登入狀態…')
+        message = t('正在确认 ChatGPT 登录状态…')
     elif authenticated:
-        message = t('ChatGPT 已登入（此工具專用），無需 API key。\n選擇中文 → 日本語與「我說」即可開始翻譯。')
+        message = t('ChatGPT 已登录（此工具专用），无需 API key。\n选择中文 → 日本语与「我说」即可开始翻译。')
     else:
-        message = t('ChatGPT 訂閱語音使用此工具專屬登入，不影響本機 Codex。\n請先登入 ChatGPT，再選擇中文 → 日本語與「我說」。')
+        message = t('ChatGPT 订阅语音使用此工具专属登录，不影响本机 Codex。\n请先登录 ChatGPT，再选择中文 → 日本语与「我说」。')
     gui._key_status.configure(text=message)
     if hasattr(gui, '_key_btn'):
-        gui._key_btn.configure(text=t('切換 ChatGPT 帳戶 ▸') if authenticated else t('登入 ChatGPT ▸'))
+        gui._key_btn.configure(text=t('切换 ChatGPT 帐户 ▸') if authenticated else t('登录 ChatGPT ▸'))
         gui._key_chip.pack_forget()
         if not gui._key_btn.winfo_manager():
             gui._key_btn.pack()
@@ -63,7 +63,7 @@ def open_signup(gui):
         gui._set_status('warn', t('当前线路需要先停止翻译，改完再重新开始'))
         return
     if getattr(gui, '_chatgpt_login_busy', False):
-        gui._set_status('info', t('ChatGPT 登入仍在進行，請完成瀏覽器中的登入。'))
+        gui._set_status('info', t('ChatGPT 登录仍在进行，请完成浏览器中的登录。'))
         return
     _run_auth(gui, login=True)
 
@@ -85,7 +85,7 @@ def _run_auth(gui, *, login):
     gui._chatgpt_auth_result = False
     gui._chatgpt_login_cancel = threading.Event()
     if login:
-        gui._set_status('info', t('請在瀏覽器完成 ChatGPT 登入；完成後可開始翻譯。'))
+        gui._set_status('info', t('请在浏览器完成 ChatGPT 登录；完成后可开始翻译。'))
 
     async def authenticate():
         from .session.codex_rpc import login_chatgpt, chatgpt_logged_in
@@ -110,12 +110,12 @@ def _run_auth(gui, *, login):
             gui._chatgpt_auth_result = ok
             if login and not gui._chatgpt_login_cancel.is_set():
                 gui._q.put(('status', 'info' if ok else 'error',
-                            t('ChatGPT 登入完成，可以開始翻譯。') if ok else t('登入未完成，請重新登入 ChatGPT。')))
+                            t('ChatGPT 登录完成，可以开始翻译。') if ok else t('登录未完成，请重新登录 ChatGPT。')))
         except asyncio.CancelledError:
             pass
         except Exception:
             if not gui._chatgpt_login_cancel.is_set():
-                gui._q.put(('status', 'error', t('無法啟動登入，請確認已安裝官方 Codex CLI。')))
+                gui._q.put(('status', 'error', t('无法启动登录，请确认已安装官方 Codex CLI。')))
         finally:
             gui._chatgpt_login_busy = False
     gui._chatgpt_login_thread = threading.Thread(target=work, daemon=False, name='vlt-chatgpt-login')

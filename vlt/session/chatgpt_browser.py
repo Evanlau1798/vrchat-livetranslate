@@ -12,13 +12,16 @@ from .chatgpt_browser_page import PAGE
 
 
 def browser_command():
-    for name in ('google-chrome', 'chromium', 'chromium-browser', 'msedge', 'chrome'):
+    for name in ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+                 'microsoft-edge-stable', 'msedge', 'chrome'):
         executable = shutil.which(name)
         if executable:
             return executable
     if os.name == 'nt':
         for root in ('PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'):
-            base = Path(os.environ.get(root, ''))
+            if not os.environ.get(root):
+                continue
+            base = Path(os.environ[root])
             for relative in ('Google/Chrome/Application/chrome.exe', 'Microsoft/Edge/Application/msedge.exe'):
                 executable = base / relative
                 if executable.is_file():
@@ -58,6 +61,7 @@ class BrowserBridge:
         self.socket = socket
         self.handler = asyncio.current_task()
         negotiated = False
+        failure = '背景 WebRTC 音訊橋接已關閉。'
         try:
             async for message in socket:
                 if isinstance(message, bytes):
@@ -79,12 +83,10 @@ class BrowserBridge:
                 elif event.get('type') == 'error':
                     raise RuntimeError('Chromium audio failed')
         except Exception:
-            if not self.closing:
-                self.on_error('背景 WebRTC 音訊橋接失敗。')
-                self.ready.set()
+            failure = '背景 WebRTC 音訊橋接失敗。'
         finally:
             if not self.closing:
-                self.on_error('背景 WebRTC 音訊橋接已關閉。')
+                self.on_error(failure)
                 self.ready.set()
 
     async def start(self, profile):
@@ -100,7 +102,7 @@ class BrowserBridge:
             self.origin + '/' + self.token, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             **({'creationflags': 0x08000000} if os.name == 'nt' else {}),
         )
-        await asyncio.wait_for(self.ready.wait(), 60)
+        await asyncio.wait_for(self.ready.wait(), 90)  # Covers 40s request + 30s SDP + peer setup.
 
     async def send(self, pcm):
         if not self.socket or self.closing:

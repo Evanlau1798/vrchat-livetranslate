@@ -1,5 +1,8 @@
 """ChatGPT 訂閱路徑：設定、工廠與 GUI 不可要求或轉送 Qwen API key。"""
 import sys
+import asyncio
+import contextlib
+import io
 import queue
 import tempfile
 import unittest
@@ -11,9 +14,70 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vlt.config import load_config
 from vlt.session.base import SessionConfig, create_session
 from vlt import gui_engine, ui_state
+from vlt.engine import Engine, EngineEvents
+from vlt import crashlog
+from vlt.session.chatgpt_live import ChatGPTLiveSession
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_watchdog_reconnects_failed_subscription_and_preserves_reason(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.yaml'
+            path.write_text('session:\n  provider: chatgpt\n', encoding='utf-8')
+            cfg = load_config(path)
+        engine = Engine(cfg, 'mine', 'mic', set(), EngineEvents())
+        session = ChatGPTLiveSession(SessionConfig(provider='chatgpt'))
+        engine._session = session
+        engine._dump_diagnostics = Mock()
+        from unittest.mock import AsyncMock
+        engine._reconnect_loop = AsyncMock()
+        async def check():
+            session._alive = True
+            await engine._watchdog()
+            self.assertIsNone(engine._reconnect_task)
+            session._fail('bridge failed')
+            await engine._watchdog()
+            self.assertIsNotNone(engine._reconnect_task, 'dead ChatGPT session never reconnects')
+            await engine._reconnect_task
+        asyncio.run(check())
+        engine._dump_diagnostics.assert_called_once_with('bridge failed')
+        engine._reconnect_loop.assert_awaited_once_with('bridge failed')
+
+    def test_engine_subscription_never_derives_or_calls_qwen_http(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'config.yaml'
+            path.write_text('session:\n  provider: chatgpt\n', encoding='utf-8')
+            cfg = load_config(path)
+        with patch('vlt.endpoints.chat_url') as chat, patch('vlt.endpoints.multimodal_url') as tts:
+            engine = Engine(cfg, 'mine', 'mic', set(), EngineEvents())
+        chat.assert_not_called()
+        tts.assert_not_called()
+        self.assertIsNone(engine._chat_endpoint)
+        self.assertIsNone(engine._tts_endpoint)
+        engine._loop, engine._stopping = Mock(), False
+        engine._thread = SimpleNamespace(is_alive=lambda: True)
+        with patch('asyncio.run_coroutine_threadsafe') as schedule, patch('vlt.engine.translate_text') as translate:
+            self.assertFalse(engine.send_text('hello'))
+            asyncio.run(engine._async_send_text('hello'))
+        schedule.assert_not_called()
+        translate.assert_not_called()
+
+    def test_startup_key_diagnostic_only_reads_the_selected_qwen_slot(self):
+        for provider in ('chatgpt', 'qianwen', 'qwencloud'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'config.yaml'
+                path.write_text('session:\n  provider: ' + provider + '\n', encoding='utf-8')
+                output = io.StringIO()
+                with patch('vlt.config.DEFAULT_CONFIG', path), patch('vlt.config.load_api_key', return_value='sk-test-only-123456789') as loader, \
+                     patch('subprocess.run', return_value=SimpleNamespace(stdout='')), contextlib.redirect_stdout(output):
+                    crashlog.log_startup_info('test')
+                if provider == 'chatgpt':
+                    loader.assert_not_called()
+                else:
+                    loader.assert_called_once_with(slot=provider)
+                    self.assertIn('API 密钥：sk-****6789', output.getvalue())
+                self.assertNotIn('sk-test-only-123456789', output.getvalue())
+
     def test_subscription_config_never_loads_api_key(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'config.yaml'

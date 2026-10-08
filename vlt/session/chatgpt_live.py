@@ -4,14 +4,16 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import time
+from pathlib import Path
 
 from .base import LiveTranslateSession, TextDelta, should_finalize
 from .codex_rpc import CodexRPC
 
 
 def interpreter_prompt(cfg):
-    source = cfg.source_lang or 'the language spoken by the user'
-    target = {'ja': 'Japanese', 'zh': 'Traditional Chinese', 'en': 'English'}.get(cfg.target_lang, cfg.target_lang)
+    names = {'ja': 'Japanese', 'zh': 'Traditional Chinese', 'en': 'English', 'ko': 'Korean', 'ru': 'Russian'}
+    source = names.get(cfg.source_lang, cfg.source_lang) or 'the language spoken by the user'
+    target = names.get(cfg.target_lang, cfg.target_lang)
     terms = '\n'.join(f'{key}: {value}' for key, value in cfg.hotwords.items())
     return (
         f'You are a simultaneous interpreter from {source} into {target}. '
@@ -58,7 +60,7 @@ class ChatGPTLiveSession(LiveTranslateSession):
             from opencc import OpenCC
             from .chatgpt_browser import BrowserBridge
             self._traditional = OpenCC('s2twp')
-            self.home = tempfile.TemporaryDirectory(prefix='vlt-chatgpt-')
+            self.home = tempfile.TemporaryDirectory(prefix='vlt-chatgpt-', ignore_cleanup_errors=True)
             self._set_phase('codex-initialize')
             self.rpc = CodexRPC(self._handle_event)
             await self.rpc.start(self.home.name)
@@ -116,9 +118,9 @@ class ChatGPTLiveSession(LiveTranslateSession):
 
     def _fail(self, message):
         self._alive = False
-        self._failure = message
+        self._failure = self._failure or message
         if self._sdp and not self._sdp.done():
-            self._sdp.set_exception(RuntimeError(message))
+            self._sdp.set_exception(RuntimeError(self._failure))
 
     def _handle_event(self, message):
         method, params = message.get('method', ''), message.get('params') or {}
@@ -161,8 +163,17 @@ class ChatGPTLiveSession(LiveTranslateSession):
         if role == 'assistant':
             self._last_text_at = time.perf_counter()
         if self._translation and self.on_text:
-            source = self._traditional.convert(self._source) if self._traditional else self._source
-            self.on_text(TextDelta(confirmed=self._translation.strip(), source=source.strip()))
+            self._emit_text()
+
+    def _emit_text(self, final=False):
+        source = self._source
+        translation = self._translation
+        if self._traditional:
+            if self.cfg.source_lang == 'zh':
+                source = self._traditional.convert(source)
+            if self.cfg.target_lang == 'zh':
+                translation = self._traditional.convert(translation)
+        self.on_text(TextDelta(confirmed=translation.strip(), source=source.strip(), is_final=final))
 
     def tick(self):
         if not self._translation or self._finalized or not self._last_text_at:
@@ -176,24 +187,25 @@ class ChatGPTLiveSession(LiveTranslateSession):
                            fast_user_quiet_s=self.cfg.fast_final_user_quiet_s):
             self._finalized = True
             if self.on_text:
-                source = self._traditional.convert(self._source) if self._traditional else self._source
-                self.on_text(TextDelta(confirmed=self._translation.strip(), source=source.strip(), is_final=True))
+                self._emit_text(final=True)
 
     async def send_audio(self, pcm16_16k):
-        if not self.is_alive():
+        if not self.is_alive:
             raise ConnectionError(self._failure or '訂閱語音尚未就緒。')
         if len(pcm16_16k) % 2:
             raise ValueError('PCM 必須是完整的 16-bit samples。')
         await asyncio.wait_for(self.bridge.send(pcm16_16k), 2)
 
+    @property
     def is_alive(self):
         return self._alive and not self._closing
 
+    @property
     def fail_reason(self):
         return self._failure
 
     def diagnostics(self):
-        return {'transport': 'codex-webrtc', 'alive': self.is_alive(), 'phase': self._phase,
+        return {'transport': 'codex-webrtc', 'alive': self.is_alive, 'phase': self._phase,
                 'bridge': bool(self.bridge and self.bridge.ready.is_set())}
 
     async def close(self):
@@ -223,3 +235,5 @@ class ChatGPTLiveSession(LiveTranslateSession):
                         self._sdp.exception()  # 啟動失敗時，取走沒有協商消費者的錯誤。
                 if self.home:
                     self.home.cleanup()
+                    if Path(self.home.name).exists():
+                        print('[chatgpt] 临时浏览器资料仍被占用，清理未完成。', flush=True)

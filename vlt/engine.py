@@ -568,6 +568,10 @@ class Engine:
         # 之类）→ **留痕**并回落千问云默认端点，绝不让 Engine 构造就崩；真正连接时实时那条腿
         # 会用 SessionConfig.url 再报一次明确错误。
         sb = cfg.session_base or {}
+        if sb.get('provider') == endpoints.PROVIDER_CHATGPT:
+            self._chat_endpoint = self._tts_endpoint = None
+            print('[net] ChatGPT 订阅语音：不使用打字翻译/译音 HTTP 端点', flush=True)
+            return
         base_url = sb.get("base_url") or endpoints.default_base_url(endpoints.DEFAULT_PROVIDER)
         try:
             self._chat_endpoint = endpoints.chat_url(base_url)
@@ -1239,7 +1243,7 @@ class Engine:
         线程安全（界面线程直接调用）；空文本 / 引擎没在跑 / 方向不是「我说」→ False。
         """
         text = (text or "").strip()
-        if not text or self._loop is None or not self.running:
+        if not text or self._loop is None or not self.running or self._chat_endpoint is None:
             return False
         if self._direction != "mine":
             # 打字替代的是**麦克风**，只对「我说」方向有意义；「别人说」那条腿的
@@ -1249,6 +1253,8 @@ class Engine:
         return True
 
     async def _async_send_text(self, text: str) -> None:
+        if self._chat_endpoint is None:
+            return
         d = self._cfg.directions.get(self._direction) or Direction()
         tcfg = self._cfg.text_input or {}
         try:

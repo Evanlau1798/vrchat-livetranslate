@@ -54,31 +54,31 @@ Linux 的安装与用法：**[GUIDE.linux.md](docs/GUIDE.linux.md)** ·
 
 ## 📖 使用指南
 
-### ChatGPT 訂閱語音（原始碼預覽）
+### ChatGPT 订阅语音（源码预览）
 
-新增「ChatGPT 訂閱語音」路徑，已實測中文語音 → 日文字幕及日文譯音。
-此路徑使用官方 Codex CLI 的訂閱語音連線，不需要 OpenAI API key；模型由服務端選擇，
-不能把它當成通用 API Credit，也不保證指定 `gpt-live` 型號可用。
+新增「ChatGPT 订阅语音」路径，已实测中文语音 → 日文字幕及日文译音。
+此路径使用官方 Codex CLI 的订阅语音连线，不需要 OpenAI API key；模型由服务端选择，
+不能把它当成通用 API Credit，也不保证指定 `gpt-live` 型号可用。
 
-1. 安裝本專案的原始碼依賴、官方 Codex CLI，以及 Chrome 或 Edge。
-2. 額外安裝：`.venv\Scripts\python.exe -m pip install -r requirements-chatgpt.txt`。
-3. 開啟 GUI，在設定切換至「ChatGPT 訂閱語音」，按「登入 ChatGPT」完成瀏覽器登入。
-   本工具使用獨立登入，首次使用需在介面登入；本機 `codex login` 不會自動共用。
-   登入完成後顯示「ChatGPT 已登入」，按鈕改為「切換 ChatGPT 帳戶」。
-   憑證由官方 CLI 儲存在使用者資料目錄的 `vrchat-livetranslate/codex/`，
-   Windows 為 `%APPDATA%\vrchat-livetranslate\codex\`；換帳戶不修改日常 Codex 登入。
-4. 選擇「我說」及中文 → 日本語，開始翻譯。需要讓 VRChat 玩家聽見日文時，
-   開啟「譯音輸出」，設定虛擬聲卡，並在 VRChat 選擇其錄音端作為麥克風。
-   選「雙向同時」可同時將你的中文轉成日文、將對方的日文轉成繁體中文字幕；
-   日文譯音只從「我說」方向送往虛擬麥克風，對方方向不輸出聲音。
+1. 安装本项目的源码依赖、官方 Codex CLI，以及 Chrome 或 Edge。
+2. 额外安装：`.venv\Scripts\python.exe -m pip install -r requirements-chatgpt.txt`。
+3. 开启 GUI，在设置切换至「ChatGPT 订阅语音」，按「登录 ChatGPT」完成浏览器登录。
+   本工具使用独立登录，首次使用需在界面登录；本机 `codex login` 不会自动共用。
+   登录完成后显示「ChatGPT 已登录」，按钮改为「切换 ChatGPT 帐户」。
+   凭证由官方 CLI 储存在用户数据目录的 `vrchat-livetranslate/codex/`，
+   Windows 为 `%APPDATA%\vrchat-livetranslate\codex\`；换帐户不修改日常 Codex 登录。
+4. 选择「我说」及中文 → 日本语，开始翻译。需要让 VRChat 玩家听见日文时，
+   开启「译音输出」，设置虚拟声卡，并在 VRChat 选择其录音端作为麦克风。
+   选「双向同时」可同时将你的中文转成日文、将对方的日文转成繁体中文字幕；
+   日文译音只从「我说」方向送往虚拟麦克风，对方方向不输出声音。
 
-支援單向及雙向語音翻譯，使用 Juniper 聲音；打字翻譯與 Qwen 聲音預聽不適用。
-雙向模式會建立兩條獨立語音連線，兩個方向各自使用訂閱額度。
-語音連線會啟動隔離的背景 Chromium，停止翻譯時清理；不使用主瀏覽器的個人資料。
-可用性及額度取決於登入帳戶與 Codex 語音服務。現有下載版 exe 尚未包含此預覽功能。
+支持单向及双向语音翻译，使用 Juniper 声音；打字翻译与 Qwen 声音预听不适用。
+双向模式会建立两条独立语音连线，两个方向各自使用订阅额度。
+语音连线会启动隔离的背景 Chromium，停止翻译时清理；不使用主浏览器的个人资料。
+可用性及额度取决于登录帐户与 Codex 语音服务。现有下载版 exe 尚未包含此预览功能。
 
-驗證命令：`.venv\Scripts\python.exe scripts/verify/verify_chatgpt_live.py`，
-只傳送專案的中文測試錄音，不開啟麥克風；結果及日文 WAV 存在 `out/chatgpt-ja/`。
+验证命令：`.venv\Scripts\python.exe scripts/verify/verify_chatgpt_live.py`，
+只传送项目的中文测试录音，不开启麦克风；结果及日文 WAV 存在 `out/chatgpt-ja/`。
 
 从**快速上手**到**已知限制**的完整内容（安装、API key、用法、配置、排障、项目结构、开发）都在单独文档里：
 

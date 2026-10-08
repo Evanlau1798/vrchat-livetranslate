@@ -90,5 +90,23 @@ class RPCTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['method'], 'transport/closed')
 
 
+    async def test_malformed_lines_do_not_drop_valid_reply_or_tool_denial(self):
+        events = []
+        rpc = CodexRPC(events.append)
+        stream = asyncio.StreamReader()
+        rpc.process = SimpleNamespace(stdout=stream)
+        rpc._send = AsyncMock()
+        future = asyncio.get_running_loop().create_future()
+        rpc.pending[1] = future
+        stream.feed_data(b'not JSON\n[]\n{"id":[]}\n'
+                         b'{"id":2,"method":"tool/execute"}\n'
+                         b'{"id":1,"result":{"ok":true}}\n')
+        stream.feed_eof()
+        await rpc._read()
+        self.assertEqual(await future, {'ok': True})
+        self.assertEqual(rpc._send.await_args.args[0]['error']['code'], -32601)
+        self.assertEqual(events, [{'method': 'transport/closed', 'params': {}}])
+
+
 if __name__ == '__main__':
     unittest.main()

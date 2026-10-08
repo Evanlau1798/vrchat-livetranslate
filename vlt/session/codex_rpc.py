@@ -99,8 +99,15 @@ class CodexRPC:
     async def _read(self):
         try:
             while line := await self.process.stdout.readline():
-                message = json.loads(line)
+                try:
+                    message = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if not isinstance(message, dict):
+                    continue
                 request_id = message.get('id')
+                if request_id is not None and type(request_id) not in (int, str):
+                    continue
                 if 'method' in message:
                     if request_id is not None:
                         # 語音內容不能要求執行工具、批准指令或擴大權限。
@@ -151,6 +158,7 @@ async def chatgpt_logged_in():
                                  stderr=asyncio.subprocess.PIPE)
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
-        return process.returncode == 0 and b'ChatGPT' in stdout + stderr
+        # Codex CLI 0.162 login status emits this canonical line; reject ambiguous output.
+        return process.returncode == 0 and b'Logged in using ChatGPT' in (stdout + b'\n' + stderr).splitlines()
     finally:
         await _stop_process(process)

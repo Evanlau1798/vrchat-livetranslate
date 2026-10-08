@@ -29,7 +29,7 @@ class GuiLoginTests(unittest.TestCase):
             callback = gui._root.after.call_args.args[1]
             callback()
         self.assertTrue(gui._chatgpt_authenticated)
-        self.assertEqual(gui._key_btn.configure.call_args.kwargs['text'], '切換 ChatGPT 帳戶 ▸')
+        self.assertEqual(gui._key_btn.configure.call_args.kwargs['text'], '切换 ChatGPT 帐户 ▸')
         self.assertNotIn('先登入', gui._key_status.configure.call_args.kwargs['text'])
 
     def test_startup_checks_saved_tool_login_and_updates_ui(self):
@@ -115,7 +115,9 @@ class LoginProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(callable(checker), 'cached ChatGPT login status is never checked')
         process = SimpleNamespace(returncode=0)
         for output, expected in ((b'Logged in using ChatGPT', True),
-                                 (b'Logged in using an API key', False)):
+                                 (b'Logged in using an API key', False),
+                                 (b'ChatGPT login failed', False),
+                                 (b'Not logged in using ChatGPT', False)):
             process.communicate = AsyncMock(return_value=(output, b''))
             with patch('vlt.session.codex_rpc.codex_command', return_value=['fake-codex']), \
                  patch('asyncio.create_subprocess_exec', new=AsyncMock(return_value=process)) as spawn:

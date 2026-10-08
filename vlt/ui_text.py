@@ -39,7 +39,7 @@ def _provider_choices() -> tuple[tuple[str, str], ...]:
     """
     return ((t("千问云"), endpoints.PROVIDER_QIANWEN),
             (t("千问云·海外版"), endpoints.PROVIDER_QWENCLOUD),
-            (t("ChatGPT 訂閱語音"), endpoints.PROVIDER_CHATGPT))
+            (t("ChatGPT 订阅语音"), endpoints.PROVIDER_CHATGPT))
 
 
 def _persist_provider(cfg_path: "Path", provider: str, base_url: str) -> None:

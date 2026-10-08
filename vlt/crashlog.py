@@ -403,6 +403,20 @@ def log_startup_info(tag: str = "") -> None:
               f"{' + 有未提交改动' if dirty else ''}")
     except Exception as exc:
         print(f"[startup] git 信息读取失败：{exc}")
+    try:
+        import yaml
+        from . import endpoints
+        from .config import DEFAULT_CONFIG, load_api_key
+        from .credentials import mask_key
+        raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding='utf-8')) if DEFAULT_CONFIG.exists() else {}
+        provider = endpoints.normalize_provider(((raw or {}).get('session') or {}).get('provider', endpoints.DEFAULT_PROVIDER))
+        if provider != endpoints.PROVIDER_CHATGPT:
+            key = load_api_key(slot=endpoints.key_slot(provider))
+            print(f"[startup] API 密钥：{mask_key(key)}")
+    except SystemExit:
+        print("[startup] API 密钥：未配置")
+    except Exception as exc:
+        print(f"[startup] API 密钥诊断不可用（{type(exc).__name__}）")
     print("=" * 64)
 
 

@@ -3,15 +3,30 @@ import asyncio
 import json
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 from websockets.exceptions import InvalidStatus
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from vlt.session.chatgpt_browser import BrowserBridge
+from vlt.session.chatgpt_browser import BrowserBridge, browser_command
+
+
+class BrowserDiscoveryTests(unittest.TestCase):
+    def test_linux_stable_browser_names(self):
+        for name in ('google-chrome-stable', 'microsoft-edge-stable'):
+            with self.subTest(browser=name), patch('shutil.which', side_effect=lambda candidate: '/usr/bin/' + name if candidate == name else None):
+                self.assertEqual(browser_command(), '/usr/bin/' + name)
+
+    def test_missing_windows_environment_never_searches_current_directory(self):
+        with patch('shutil.which', return_value=None), patch.dict('os.environ', {}, clear=True), \
+             patch('pathlib.Path.is_file', return_value=True) as probe:
+            with self.assertRaises(RuntimeError):
+                browser_command()
+        probe.assert_not_called()
 
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
@@ -65,7 +80,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await socket.send(b'x')
             await asyncio.wait_for(socket.wait_closed(), 1)
         self.assertFalse(self.audio)
-        self.assertTrue(self.errors)
+        self.assertEqual(self.errors, ['背景 WebRTC 音訊橋接失敗。'])
+
+    async def test_unexpected_disconnect_reports_closed_once(self):
+        async with connect(self.url, origin=self.bridge.origin):
+            pass
+        await asyncio.wait_for(self.bridge.ready.wait(), 1)
+        self.assertEqual(self.errors, ['背景 WebRTC 音訊橋接已關閉。'])
 
     async def test_close_cancels_pending_negotiation(self):
         started = asyncio.Event()
@@ -81,6 +102,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(self.bridge.close(), 1)
         self.assertTrue(self.bridge.handler.done())
         self.assertFalse(self.errors)
+
+    async def test_startup_budget_allows_both_negotiation_phases(self):
+        bridge = BrowserBridge(AsyncMock(), Mock(), Mock())
+        server = SimpleNamespace(sockets=[SimpleNamespace(getsockname=lambda: ('127.0.0.1', 12345))],
+                                 close=Mock(), wait_closed=AsyncMock())
+        async def budget(wait, timeout):
+            bridge.ready.set()
+            await wait
+            self.assertGreaterEqual(timeout, 75, '40s request + 30s SDP + browser ICE must fit')
+        with patch('websockets.asyncio.server.serve', new=AsyncMock(return_value=server)), \
+             patch('asyncio.create_subprocess_exec', new=AsyncMock(return_value=SimpleNamespace(returncode=0))), \
+             patch('vlt.session.chatgpt_browser.browser_command', return_value='fake-browser'), \
+             patch('asyncio.wait_for', side_effect=budget):
+            try:
+                await bridge.start('unused-profile')
+            finally:
+                await bridge.close()
 
 
 if __name__ == '__main__':

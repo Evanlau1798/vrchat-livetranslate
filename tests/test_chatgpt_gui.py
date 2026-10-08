@@ -14,6 +14,13 @@ from vlt import gui as gui_mod, crashlog, i18n
 
 
 class GuiTests(unittest.TestCase):
+    def test_chinese_subscription_catalog_matches_simplified_base_language(self):
+        from opencc import OpenCC
+        from vlt.locales.chatgpt import STRINGS
+        convert = OpenCC('t2s').convert
+        for key in STRINGS['en']:
+            self.assertEqual(key, convert(key).replace('登入', '登录'))
+
     def setUp(self):
         sandbox_config(reset=True)
         i18n.set_language('zh')
@@ -33,7 +40,7 @@ class GuiTests(unittest.TestCase):
             try:
                 loader.assert_not_called()
                 self.assertNotEqual(gui._last_status_level, 'error')
-                self.assertEqual(gui._key_btn.cget('text'), '登入 ChatGPT ▸')
+                self.assertEqual(gui._key_btn.cget('text'), '登录 ChatGPT ▸')
             finally:
                 gui._root.destroy()
 
@@ -65,12 +72,14 @@ class GuiTests(unittest.TestCase):
         from vlt.ui_text import _provider_choices
         from vlt.gui_chatgpt import refresh_key_status
         from unittest.mock import Mock
+        expected = {'en': 'Log in to ChatGPT ▸', 'ja': 'ChatGPT にログイン ▸',
+                    'ko': 'ChatGPT 로그인 ▸', 'ru': 'Войти в ChatGPT ▸'}
         for lang in ('en', 'ja', 'ko', 'ru'):
             i18n.set_language(lang)
-            self.assertNotEqual(dict((pid, name) for name, pid in _provider_choices())['chatgpt'], 'ChatGPT 訂閱語音')
+            self.assertNotEqual(dict((pid, name) for name, pid in _provider_choices())['chatgpt'], 'ChatGPT 订阅语音')
             gui = SimpleNamespace(_provider=lambda: 'chatgpt', _key_status=Mock(), _key_btn=Mock(), _key_chip=Mock())
             refresh_key_status(gui)
-            self.assertNotEqual(gui._key_btn.configure.call_args.kwargs['text'], '登入 ChatGPT ▸')
+            self.assertEqual(gui._key_btn.configure.call_args.kwargs['text'], expected[lang])
         i18n.set_language('zh')
 
     def test_saved_provider_updates_auth_voice_and_text_controls(self):
@@ -88,7 +97,7 @@ class GuiTests(unittest.TestCase):
                     gui._provider_save_btn.invoke()
                     self.assertEqual(gui._provider(), 'chatgpt')
                     self.assertEqual(gui._cfg.session_base['api_key'], '')
-                    self.assertEqual(gui._key_btn.cget('text'), i18n.t('登入 ChatGPT ▸'))
+                    self.assertEqual(gui._key_btn.cget('text'), i18n.t('登录 ChatGPT ▸'))
                     self.assertEqual(str(gui._key_entry.cget('state')), 'disabled')
                     self.assertEqual(str(gui._speech_voice_combo.cget('state')), 'disabled')
                     self.assertTrue(gui._chat_ctx.text_entry.instate(['disabled']))

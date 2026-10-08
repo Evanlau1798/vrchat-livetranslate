@@ -40,8 +40,8 @@ async def main():
         pcm = (ROOT / 'testdata' / 'zh_test_16k.pcm').read_bytes()
         input_started = time.perf_counter()
         for offset in range(0, len(pcm) + 32000 * 20, 3200):
-            if not session.is_alive():
-                raise RuntimeError(session.fail_reason())
+            if not session.is_alive:
+                raise RuntimeError(session.fail_reason)
             block = pcm[offset:offset + 3200] if offset < len(pcm) else bytes(3200)
             samples = np.frombuffer(block, dtype='<i2')
             if max(abs(int(samples.min())), abs(int(samples.max()))) >= 250:
