@@ -38,6 +38,11 @@ class BrowserBridge:
         self.ready = asyncio.Event()
         self.closing = False
         self.handler = None
+        self._pending_pcm = 0
+        self._consumed_pcm = 0
+        self._drained = asyncio.Event()
+        self._send_lock = asyncio.Lock()
+        self._send_failed = False
 
     async def _http(self, connection, request):
         if request.headers.get('Host') != self.origin.removeprefix('http://'):
@@ -81,10 +86,23 @@ class BrowserBridge:
                         raise ValueError('Missing offer')
                     self.ready.set()
                 elif event.get('type') == 'error':
+                    failure = {'input-overflow': '背景 WebRTC 音訊橋接失敗（輸入緩衝溢位）。',
+                               'output-backpressure': '背景 WebRTC 音訊橋接失敗（輸出回壓）。'}.get(
+                                   event.get('reason'), '背景 WebRTC 音訊橋接失敗。')
                     raise RuntimeError('Chromium audio failed')
+                elif event.get('type') == 'consumed':
+                    size = event.get('bytes')
+                    if type(size) is not int or size <= 0 or size % 2 or size > self._pending_pcm:
+                        raise ValueError('Invalid consumption acknowledgment')
+                    self._pending_pcm -= size
+                    self._consumed_pcm += size
+                    self._drained.set()
         except Exception:
-            failure = '背景 WebRTC 音訊橋接失敗。'
+            if failure == '背景 WebRTC 音訊橋接已關閉。':
+                failure = '背景 WebRTC 音訊橋接失敗。'
         finally:
+            self._send_failed = True
+            self._drained.set()
             if not self.closing:
                 self.on_error(failure)
                 self.ready.set()
@@ -105,12 +123,31 @@ class BrowserBridge:
         await asyncio.wait_for(self.ready.wait(), 90)  # Covers 40s request + 30s SDP + peer setup.
 
     async def send(self, pcm):
-        if not self.socket or self.closing:
+        if not self.socket or self.closing or self._send_failed:
             raise ConnectionError('背景音訊橋接不可用。')
-        await self.socket.send(pcm)
+        if len(pcm) % 2:
+            raise ValueError('PCM 必須是完整的 16-bit samples。')
+        async with self._send_lock:
+            for offset in range(0, len(pcm), 3200):
+                block = pcm[offset:offset + 3200]
+                while self._pending_pcm + len(block) > 32000:
+                    self._drained.clear()
+                    try:
+                        await asyncio.wait_for(self._drained.wait(), 1.5)
+                    except asyncio.TimeoutError:
+                        self._send_failed = True
+                        self.on_error('背景音訊橋接未消耗輸入音訊。')
+                        raise ConnectionError('背景音訊橋接未消耗輸入音訊。') from None
+                    if self.closing or self._send_failed:
+                        raise ConnectionError('背景音訊橋接不可用。')
+                if self.closing or self._send_failed:
+                    raise ConnectionError('背景音訊橋接不可用。')
+                self._pending_pcm += len(block)
+                await self.socket.send(block)
 
     async def close(self):
         self.closing = True
+        self._drained.set()
         if self.socket:
             try:
                 await self.socket.send('{"type":"close"}')

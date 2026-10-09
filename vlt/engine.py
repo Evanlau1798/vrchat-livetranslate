@@ -5,6 +5,7 @@ GUI 与 CLI 共用同一个 Engine 类；区别只在事件回调和音频源。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -544,6 +545,7 @@ class Engine:
         self._text_deltas = 0          # 收到的译文本条数
         self._text_hist: deque[tuple[float, str]] = deque(maxlen=40)
         self._session_started_at = 0.0
+        self._progress_at = None
         self._pump_task: asyncio.Task | None = None
 
         self._connect_ts: list[float] = []
@@ -1087,7 +1089,31 @@ class Engine:
                 self._overlay.tick()
             if self._session is not None:
                 self._session.tick()
+                self._log_audio_progress()
                 await self._watchdog()      # 会话挂了就自动重连（不再让这条腿永久死掉）
+
+    def _log_audio_progress(self, now=None) -> None:
+        if self._cfg.session_base.get('provider') != endpoints.PROVIDER_CHATGPT or self._session is None:
+            return
+        now = time.monotonic() if now is None else now
+        if self._progress_at is not None and now-self._progress_at < 30:
+            return
+        self._progress_at = now
+        try:
+            snapshot = self._session.diagnostics()
+            keys = ('alive', 'phase', 'bridge', 'source_events', 'translation_events',
+                    'source_age_s', 'translation_age_s', 'source_chars', 'translation_chars',
+                    'finalized', 'bridge_pending_bytes', 'bridge_consumed_bytes')
+            progress = {key: snapshot.get(key) for key in keys
+                        if type(snapshot.get(key)) in (bool, int, float, str, type(None))}
+            progress.update(input_chunks=self._audio_in_chunks, send_fails=self._proxy.send_fails,
+                            gate_dropped=self._input_gate.dropped_chunks,
+                            gate_opened=self._input_gate.opened,
+                            output_deltas=self._text_deltas,
+                            repeat_dropped=self._repeat_dropped)
+            print(f'[{self._direction}][progress] {json.dumps(progress)}', flush=True)
+        except Exception:  # noqa: BLE001 — 诊断不能中断采集或泄露错误内容。
+            print(f'[{self._direction}][progress] unavailable', flush=True)
 
     async def _feed_audio(self) -> None:
         if self._source.startswith("pcm:"):

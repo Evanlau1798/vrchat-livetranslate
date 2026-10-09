@@ -14,6 +14,23 @@ from vlt import gui as gui_mod, crashlog, i18n
 
 
 class GuiTests(unittest.TestCase):
+    def test_provider_choices_explain_codex_quota_in_every_ui_language(self):
+        from vlt.ui_text import _provider_choices
+        expected = {
+            'zh': 'ChatGPT 订阅语音（消耗 Codex 额度）',
+            'en': 'ChatGPT subscription voice (uses Codex quota)',
+            'ja': 'ChatGPT サブスクリプション音声（Codex の利用枠を消費）',
+            'ko': 'ChatGPT 구독 음성 (Codex 사용 한도 소모)',
+            'ru': 'Голос по подписке ChatGPT (расходует квоту Codex)',
+        }
+        for lang, label in expected.items():
+            with self.subTest(lang=lang):
+                i18n.set_language(lang)
+                choices = _provider_choices()
+                self.assertEqual([pid for _, pid in choices], ['qianwen', 'qwencloud', 'chatgpt'])
+                self.assertEqual(dict((pid, name) for name, pid in choices)['chatgpt'], label)
+        i18n.set_language('zh')
+
     def test_chinese_subscription_catalog_matches_simplified_base_language(self):
         from opencc import OpenCC
         from vlt.locales.chatgpt import STRINGS
@@ -93,6 +110,9 @@ class GuiTests(unittest.TestCase):
                 try:
                     gui._root.withdraw()
                     self.assertEqual(i18n.current_language(), lang)
+                    label = i18n.t('ChatGPT 订阅语音（消耗 Codex 额度）')
+                    self.assertIn(label, gui._provider_combo.cget('values'))
+                    self.assertEqual(gui._provider_name_to_id[label], 'chatgpt')
                     gui._provider_var.set(gui._provider_id_to_name['chatgpt'])
                     gui._provider_save_btn.invoke()
                     self.assertEqual(gui._provider(), 'chatgpt')

@@ -82,6 +82,42 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.audio)
         self.assertEqual(self.errors, ['背景 WebRTC 音訊橋接失敗。'])
 
+    async def test_preroll_waits_for_worklet_consumption_without_dropping_audio(self):
+        async with connect(self.url, origin=self.bridge.origin) as socket:
+            pcm = b'\x01\x00' * 17600
+            sending = asyncio.create_task(self.bridge.send(pcm))
+            received = b''.join([await asyncio.wait_for(socket.recv(), 1) for _ in range(10)])
+            self.assertEqual(len(received), 32000)
+            self.assertFalse(sending.done(), 'The live block must wait for capacity')
+            await socket.send('{"type":"consumed","bytes":3200}')
+            received += await asyncio.wait_for(socket.recv(), 1)
+            await asyncio.wait_for(sending, 1)
+            self.assertEqual(received, pcm)
+            self.assertEqual(self.bridge._consumed_pcm, 3200)
+            self.assertFalse(self.errors)
+
+    async def test_close_releases_blocked_audio_sender(self):
+        async with connect(self.url, origin=self.bridge.origin):
+            await self.bridge.send(bytes(32000))
+            blocked = asyncio.create_task(self.bridge.send(bytes(3200)))
+            await asyncio.sleep(.01)
+            self.assertFalse(blocked.done())
+            await self.bridge.close()
+            with self.assertRaises(ConnectionError):
+                await asyncio.wait_for(blocked, 1)
+
+    async def test_worklet_overflow_has_a_sanitized_failure_category(self):
+        async with connect(self.url, origin=self.bridge.origin) as socket:
+            await socket.send('{"type":"error","reason":"input-overflow"}')
+            await asyncio.wait_for(socket.wait_closed(), 1)
+        self.assertEqual(self.errors, ['背景 WebRTC 音訊橋接失敗（輸入緩衝溢位）。'])
+
+    async def test_arbitrary_browser_error_details_are_not_exposed(self):
+        async with connect(self.url, origin=self.bridge.origin) as socket:
+            await socket.send('{"type":"error","reason":"private-untrusted-detail"}')
+            await asyncio.wait_for(socket.wait_closed(), 1)
+        self.assertEqual(self.errors, ['背景 WebRTC 音訊橋接失敗。'])
+
     async def test_unexpected_disconnect_reports_closed_once(self):
         async with connect(self.url, origin=self.bridge.origin):
             pass

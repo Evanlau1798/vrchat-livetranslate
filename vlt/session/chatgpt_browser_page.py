@@ -4,7 +4,8 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
 <script>
 (async () => {
   let peer, context, socket, input, sink;
-  const fail = () => { if(socket?.readyState === 1) socket.send(JSON.stringify({type:'error'})); };
+  const fail = reason => { if(socket?.readyState === 1) socket.send(JSON.stringify({type:'error',
+    reason:['input-overflow','output-backpressure'].includes(reason)?reason:'audio'})); };
   try {
     context = new AudioContext({sampleRate:24000}); await context.resume();
     if(context.sampleRate !== 24000 || context.state !== 'running') throw Error('Audio context unavailable');
@@ -12,9 +13,11 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
     class PCMInput extends AudioWorkletProcessor {
       constructor(){super();this.blocks=[];this.offset=0;this.phase=0;this.previous=0;this.current=0;this.count=0;
         this.port.onmessage=e=>{const samples=new Int16Array(e.data);this.blocks.push(samples);this.count+=samples.length;
-          if(this.count>16000){this.port.postMessage('overflow');this.blocks=[];this.count=0;}};}
+          if(this.count>16000){this.port.postMessage({type:'overflow'});this.blocks=[];this.count=0;
+            this.offset=this.phase=this.previous=this.current=0;}};}
       next(){if(!this.blocks.length)return 0;const value=this.blocks[0][this.offset++]/32768;this.count--;
-        if(this.offset===this.blocks[0].length){this.blocks.shift();this.offset=0;}return value;}
+        if(this.offset===this.blocks[0].length){const block=this.blocks.shift();this.offset=0;
+          this.port.postMessage({type:'consumed',bytes:block.byteLength});}return value;}
       process(inputs,outputs){const out=outputs[0][0];for(let i=0;i<out.length;i++){
         out[i]=this.previous*(1-this.phase)+this.current*this.phase;this.phase+=16000/sampleRate;
         if(this.phase>=1){this.phase-=1;this.previous=this.current;this.current=this.next();}}return true;}
@@ -32,7 +35,7 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
     await context.audioWorklet.addModule(blobUrl); URL.revokeObjectURL(blobUrl);
     const destination=context.createMediaStreamDestination();
     input=new AudioWorkletNode(context,'pcm-input'); input.connect(destination);
-    input.port.onmessage=fail;
+    input.port.onmessage=e=>{if(e.data.type==='consumed' && socket?.readyState===1)socket.send(JSON.stringify(e.data));else fail('input-overflow');};
     peer=new RTCPeerConnection({bundlePolicy:'max-bundle'});
     peer.addTrack(destination.stream.getAudioTracks()[0],destination.stream);
     peer.addTransceiver('video',{direction:'sendonly'}); peer.createDataChannel('',{negotiated:true,id:0});
@@ -42,7 +45,7 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
       const stream=new MediaStream([event.track]); sink=document.createElement('audio');sink.srcObject=stream;sink.volume=0;sink.play().catch(fail);
       const source=context.createMediaStreamSource(stream), capture=new AudioWorkletNode(context,'pcm-output'), mute=context.createGain();mute.gain.value=0;
       source.connect(capture);capture.connect(mute);mute.connect(context.destination);
-      capture.port.onmessage=e=>{if(socket.readyState!==1)return;if(socket.bufferedAmount>96000){fail();return;}socket.send(e.data);};
+      capture.port.onmessage=e=>{if(socket.readyState!==1)return;if(socket.bufferedAmount>96000){fail('output-backpressure');return;}socket.send(e.data);};
     };
     peer.onconnectionstatechange=()=>{
       if(peer.connectionState==='connected')socket.send(JSON.stringify({type:'ready'}));
