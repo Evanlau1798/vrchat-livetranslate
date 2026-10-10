@@ -1,6 +1,6 @@
 # ChatGPT 语音翻译的提示词防护 Findings
 
-此文件记录目前的防护方式、实测发现及验证边界。适用于现有 ChatGPT 订阅语音路径；没有新增独立 ASR、文字翻译服务或音频后处理模型。
+此文件记录目前的防护方式、实测发现及验证边界。现有已提交实现尚未接入独立来源 ASR、文字翻译服务或音频核对模型；后续研究候选与生产实现分开记录。
 
 ## 当前发布状态
 
@@ -10,10 +10,20 @@
 |---|---|
 | 工具专属登录的独立来源转录 | 使用明确指定的应用专属认证文件，完成中文真人录音与日文音频分段转录；未使用全局 Codex 登录。仅证明有限样本的转录可用，不保证逐字准确 |
 | 订阅文字翻译及语义校验 | 直接调用订阅文字 HTTP 路线，发送 `tools: []`、`tool_choice: "none"`，没有本地代理或工具执行循环。正常语句和工具诱导原句获得译文，独立校验接受忠实译文并拒绝原文没有的算式答案；仅支持这些有限检查 |
-| GPT-Live 译音的工具隔离 | 未通过。现用 app-server 的 `clientManagedHandoffs` 控制 Codex 回复如何返回语音会话，不是禁止后台 handoff 的开关；在通知客户端之前，仍有将 handoff 输入路由至 Codex 的执行路径 |
-| 译音完成及归属 | 未通过。现有浏览器音频回调只携带 PCM，没有回应／段落标识；转录 `done` 是分片边界，不代表对应音频已完整结束。静音超时不能作为安全放行依据 |
+| GPT-Live 译音的工具隔离 | 未通过。现用 app-server 在通知客户端之前仍会路由 handoff；`clientManagedHandoffs` 不是禁工具开关。直连研究候选不启动本地代理，但实际服务端配置尚未获得适用契约或有效配置证据 |
+| 译音完成及归属 | 未通过。现有生产 PCM 回调缺少配对标识。直连候选取得带标识与时间范围的原始 turn 事件及关闭确认，但反射音频存在缺帧，主 WebRTC 媒体完成与排空也未证实。静音超时不能作为安全放行依据 |
 
 工具边界依据与安装版本对应的[公开实现](https://github.com/openai/codex/blob/74e804deeb1241d5fe699b31fb319f7d46454c42/codex-rs/core/src/realtime_conversation.rs#L1763)及[参数说明](https://github.com/openai/codex/blob/74e804deeb1241d5fe699b31fb319f7d46454c42/codex-rs/app-server-protocol/src/protocol/v2/realtime.rs#L197)。这证明当前客户端路径仍可进入后台路由，不能由此声称已经确认所有服务端工具能力，也不能将 RPC 拒绝请求当成服务端隔离证明。
+
+### 直接订阅管线的进一步检查
+
+应用专属登录的直接 WebRTC 候选已建立连接，不启动 app-server、不设置代理或通用工具执行器。它切断了上述已知本地后台执行路径；但 HTTP 建立成功、请求中的 `delegation.type: "client"`，以及只返回标识和状态的启动事件，不能单独证明实际服务端工具配置。官方 [delegation 契约](https://developers.openai.com/api/docs/guides/live-delegation)区分 client 与 Responses 执行模式，不能把其中一类工具设置当成所有私有订阅路线上共用的禁工具开关。
+
+原始事件能提供 assistant turn 的标识和时间范围，也收到明确的 `session.close`／`session.closed`。Sideband 的反射 PCM 带有时间范围，但多个正常语句检查出现了段内缺帧，本地覆盖检查拒绝这些音频。官方[音频事件说明](https://developers.openai.com/api/reference/resources/live/primary-websocket)也说明反射帧可能丢失；不能补零或仅凭关闭确认声称完整。浏览器主音频流在会话关闭确认时仍未观察到独立的远端媒体结束，完成与 decoder／resampler 排空仍待验证。
+
+相符版本的[独立发声实现](https://github.com/openai/codex/blob/74e804deeb1241d5fe699b31fb319f7d46454c42/codex-rs/core/src/realtime_conversation.rs#L2349)使用 `session.context.append` 的 `speakable` 通道。这条候选在没有输入用户音频时，接受了一段已核准译文并产生语音；完整本地回录的独立转录出现了核准译文没有的额外问候，无工具文字校验返回拒绝。单次结果尚未区分服务生成偏差与 ASR 误差，也未通过音频完整性检查，不代表逐字发声或端到端验收。
+
+这些检查没有接入生产输出链。缺帧、额外内容或无法确认完成的段落均未用于播放或对外发布；没有以全量丢弃替代正常使用验收。
 
 [codex-asr](https://github.com/Wangnov/codex-asr) 是一次性私有转录接口的客户端，没有时间戳或可选择底层模型的契约。它有助建立独立逐字稿，本身不构成提示词注入防护。公开订阅接口的[支持范围](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)也不能直接套用到私有语音接口。
 
