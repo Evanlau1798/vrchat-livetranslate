@@ -8,7 +8,9 @@ import platform
 import shutil
 from pathlib import Path
 
-from .. import paths
+from .chatgpt_auth import AUTH_OWNER, prepare_home
+
+_REAP_TIMEOUT = 3
 
 
 def codex_command() -> list[str]:
@@ -29,9 +31,9 @@ def codex_command() -> list[str]:
 
 
 async def _spawn_codex(*args, **kwargs):
+    AUTH_OWNER.require_usable()
     # 使用者資料目錄與原始碼／portable 目錄分開，憑證不落入專案。
-    home = paths._user_data_dir() / 'codex'
-    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    home = prepare_home()
     env = dict(os.environ, CODEX_HOME=str(home))
     for name in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'):
         env.pop(name, None)
@@ -43,13 +45,48 @@ async def _spawn_codex(*args, **kwargs):
 
 
 async def _stop_process(process):
-    if process and process.returncode is None:
-        process.terminate()
+    if process is None or process.returncode is not None:
+        return
+
+    async def reap():
         try:
-            await asyncio.wait_for(process.wait(), 3)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            process.terminate()
+        except OSError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), _REAP_TIMEOUT)
+        except (asyncio.TimeoutError, OSError):
+            try:
+                process.kill()
+            except OSError:
+                pass
+            await asyncio.wait_for(process.wait(), _REAP_TIMEOUT)
+        if process.returncode is None:
+            raise RuntimeError('process-cleanup')
+
+    # 持鎖 caller 不可因第二次取消而留下仍能寫入憑證的 CLI。
+    task = asyncio.create_task(reap())
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break
+    if task.cancelled() or task.exception() is not None:
+        raise RuntimeError('process-cleanup') from None
+    if cancelled:
+        raise asyncio.CancelledError()
+    task.result()
+
+
+async def _stop_auth_process(process):
+    try:
+        await _stop_process(process)
+    except RuntimeError:
+        AUTH_OWNER.quarantine()
+        raise
 
 
 class CodexRPC:
@@ -61,13 +98,22 @@ class CodexRPC:
         self.next_id = 0
         self.lock = asyncio.Lock()
         self.closing = False
+        self._close_task = None
 
     async def start(self, cwd: str):
-        self.process = await _spawn_codex(
-            '--enable', 'realtime_conversation', 'app-server', '--stdio',
-            cwd=cwd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024,
-        )
+        async with AUTH_OWNER.exclusive():
+            if self.closing:
+                raise RuntimeError('rpc-closed')
+            if self.process is not None:
+                raise RuntimeError('rpc-started')
+            self.process = await _spawn_codex(
+                '--enable', 'realtime_conversation', 'app-server', '--stdio',
+                cwd=cwd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, limit=4 * 1024 * 1024,
+            )
+            if self.closing:
+                await _stop_auth_process(self.process)
+                raise RuntimeError('rpc-closed')
         self.reader = asyncio.create_task(self._read())
         await self.request('initialize', {
             'clientInfo': {'name': 'vrchat_livetranslate', 'version': '1'},
@@ -120,7 +166,11 @@ class CodexRPC:
                         continue
                     if 'error' in message:
                         # 不回傳未過濾的服務端內容，避免 token／帳戶資料進入 GUI log。
-                        future.set_exception(RuntimeError(f'Codex 請求失敗（{message["error"].get("code", "unknown")}）。'))
+                        error = message['error']
+                        code = error.get('code') if isinstance(error, dict) else None
+                        if type(code) is not int or not -2147483648 <= code <= 2147483647:
+                            code = 'unknown'
+                        future.set_exception(RuntimeError(f'Codex 請求失敗（{code}）。'))
                     else:
                         future.set_result(message.get('result', {}))
         except (ValueError, OSError, asyncio.LimitOverrunError):
@@ -134,14 +184,37 @@ class CodexRPC:
 
     async def close(self):
         self.closing = True
-        await _stop_process(self.process)
-        if self.reader:
-            self.reader.cancel()
-            await asyncio.gather(self.reader, return_exceptions=True)
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close())
+        cancelled = False
+        while not self._close_task.done():
+            try:
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        self._close_task.result()
+        if cancelled:
+            raise asyncio.CancelledError()
+
+    async def _close(self):
+        try:
+            async with AUTH_OWNER.exclusive(cleanup=True):
+                await _stop_auth_process(self.process)
+        finally:
+            if self.reader:
+                self.reader.cancel()
+                await asyncio.gather(self.reader, return_exceptions=True)
 
 
 async def login_chatgpt():
     """官方 CLI 將登入儲存在工具專屬 CODEX_HOME。"""
+    async with AUTH_OWNER.exclusive(login=True):
+        return await _login_chatgpt()
+
+
+async def _login_chatgpt():
     process = await _spawn_codex(
         'login', stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
@@ -149,11 +222,16 @@ async def login_chatgpt():
     try:
         return await asyncio.wait_for(process.wait(), 180) == 0
     finally:
-        await _stop_process(process)
+        await _stop_auth_process(process)
 
 
 async def chatgpt_logged_in():
     """只檢查官方 CLI 的本機登入快取，不讀取 token 或呼叫模型。"""
+    async with AUTH_OWNER.exclusive():
+        return await _chatgpt_logged_in()
+
+
+async def _chatgpt_logged_in():
     process = await _spawn_codex('login', 'status', stdout=asyncio.subprocess.PIPE,
                                  stderr=asyncio.subprocess.PIPE)
     try:
@@ -161,4 +239,4 @@ async def chatgpt_logged_in():
         # Codex CLI 0.162 login status emits this canonical line; reject ambiguous output.
         return process.returncode == 0 and b'Logged in using ChatGPT' in (stdout + b'\n' + stderr).splitlines()
     finally:
-        await _stop_process(process)
+        await _stop_auth_process(process)

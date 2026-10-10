@@ -1,7 +1,9 @@
 """登入途中關窗的離線清理契約，不執行真實登入。"""
 import asyncio
+import os
 import queue
 import sys
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -106,11 +108,188 @@ class GuiLoginTests(unittest.TestCase):
 
 class LoginProcessTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        from vlt.session.chatgpt_auth import AuthOwner
+        owner = patch('vlt.session.codex_rpc.AUTH_OWNER', AuthOwner())
+        owner.start()
+        self.addCleanup(owner.stop)
         folder = tempfile.TemporaryDirectory(prefix='vlt-login-test-')
         self.addCleanup(folder.cleanup)
         store = patch('vlt.paths._user_data_dir', return_value=Path(folder.name))
         store.start()
         self.addCleanup(store.stop)
+
+    async def test_relative_data_root_is_rejected_before_cli_spawn(self):
+        from vlt import paths
+        with patch.object(paths, '_user_data_dir', return_value=Path('relative-data')), \
+             patch('asyncio.create_subprocess_exec', new=AsyncMock()) as spawn:
+            with self.assertRaisesRegex(RuntimeError, '^auth-home$'):
+                await login_chatgpt()
+        spawn.assert_not_called()
+
+    async def test_hardlinked_credentials_are_rejected_before_cli_spawn(self):
+        from vlt.session.chatgpt_auth import auth_home
+        home = auth_home()
+        home.mkdir()
+        external = home.parent / 'fake-global-auth.json'
+        external.write_bytes(b'fake-credentials')
+        os.link(external, home / 'auth.json')
+        with patch('asyncio.create_subprocess_exec', new=AsyncMock()) as spawn:
+            with self.assertRaisesRegex(RuntimeError, '^auth-home$'):
+                await login_chatgpt()
+        spawn.assert_not_called()
+        self.assertEqual(external.read_bytes(), b'fake-credentials')
+
+    async def test_repeated_cancel_keeps_owner_until_cli_reaped(self):
+        from vlt.session.codex_rpc import AUTH_OWNER
+        started, cleaning, reaped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        process = SimpleNamespace(returncode=None, terminate=Mock(), kill=Mock())
+
+        async def wait():
+            if not process.terminate.called:
+                started.set()
+                await asyncio.Event().wait()
+            cleaning.set()
+            await reaped.wait()
+            process.returncode = 0
+            return 0
+
+        process.wait = wait
+        other = SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))
+        with patch('vlt.session.codex_rpc._spawn_codex', new=AsyncMock(side_effect=[process, other])) as spawn:
+            first = asyncio.create_task(login_chatgpt())
+            second = None
+            try:
+                await started.wait()
+                first.cancel()
+                await cleaning.wait()
+                first.cancel()
+                second = asyncio.create_task(login_chatgpt())
+                await asyncio.sleep(.06)
+                self.assertTrue(AUTH_OWNER._lock.locked(), 'owner released before child was reaped')
+                self.assertEqual(spawn.call_count, 1)
+            finally:
+                reaped.set()
+                await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+        self.assertTrue(first.cancelled())
+        self.assertEqual(process.returncode, 0)
+        process.terminate.assert_called_once()
+
+    async def test_unconfirmed_cli_cleanup_blocks_further_credential_access(self):
+        from vlt.session.codex_rpc import AUTH_OWNER, chatgpt_logged_in
+        process = SimpleNamespace(returncode=None,
+                                  terminate=Mock(side_effect=PermissionError('private-terminate')),
+                                  kill=Mock(side_effect=PermissionError('private-kill')),
+                                  wait=AsyncMock(side_effect=OSError('private-wait')))
+        generation = AUTH_OWNER.generation
+        with patch('vlt.session.codex_rpc._spawn_codex', new=AsyncMock(return_value=process)) as spawn:
+            with self.assertRaisesRegex(RuntimeError, '^process-cleanup$'):
+                await login_chatgpt()
+            for operation in (login_chatgpt, chatgpt_logged_in, AUTH_OWNER.credentials):
+                with self.assertRaisesRegex(RuntimeError, '^auth-cleanup$'):
+                    await operation()
+        self.assertEqual(spawn.call_count, 1, 'unreaped writer must prevent another CLI or token read')
+        self.assertGreater(AUTH_OWNER.generation, generation)
+        process.kill.assert_called_once()
+
+    async def test_terminate_failure_falls_back_to_kill_and_reap(self):
+        started = asyncio.Event()
+        process = SimpleNamespace(returncode=None,
+                                  terminate=Mock(side_effect=PermissionError('private-terminate')))
+
+        def kill():
+            process.returncode = -1
+
+        async def wait():
+            if process.returncode is not None:
+                return process.returncode
+            if process.terminate.called:
+                raise OSError('private-wait')
+            started.set()
+            await asyncio.Event().wait()
+
+        process.kill, process.wait = Mock(side_effect=kill), wait
+        with patch('vlt.session.codex_rpc._spawn_codex', new=AsyncMock(return_value=process)):
+            task = asyncio.create_task(login_chatgpt())
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        process.kill.assert_called_once()
+        self.assertEqual(process.returncode, -1)
+
+    async def test_linked_home_is_rejected_before_cli_spawn(self):
+        with patch('pathlib.Path.resolve', return_value=Path('C:/other-store')), \
+             patch('asyncio.create_subprocess_exec', new=AsyncMock()) as spawn:
+            with self.assertRaisesRegex(RuntimeError, '^auth-home$'):
+                await login_chatgpt()
+        spawn.assert_not_called()
+
+    async def test_actual_link_or_windows_junction_cannot_redirect_login(self):
+        from vlt.session.chatgpt_auth import auth_home
+        home = auth_home()
+        target = home.parent / 'fake-global-codex'
+        target.mkdir()
+        if os.name == 'nt':
+            created = subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(home), str(target)],
+                                     capture_output=True, timeout=10)
+            self.assertEqual(created.returncode, 0, 'temporary junction could not be created')
+        else:
+            home.symlink_to(target, target_is_directory=True)
+        try:
+            with patch('asyncio.create_subprocess_exec', new=AsyncMock()) as spawn:
+                with self.assertRaisesRegex(RuntimeError, '^auth-home$'):
+                    await login_chatgpt()
+            spawn.assert_not_called()
+            self.assertEqual(list(target.iterdir()), [])
+        finally:
+            if os.name == 'nt':
+                os.rmdir(home)
+            else:
+                home.unlink()
+
+    @unittest.skipUnless(sys.platform != 'win32', 'POSIX permission contract')
+    async def test_existing_private_home_is_tightened_before_cli_spawn(self):
+        from vlt.session.chatgpt_auth import auth_home
+        home = auth_home()
+        home.mkdir(mode=0o755)
+        home.chmod(0o755)
+        process = SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))
+
+        async def spawn(*args, **kwargs):
+            self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+            return process
+
+        with patch('vlt.session.codex_rpc.codex_command', return_value=['fake-codex']), \
+             patch('asyncio.create_subprocess_exec', side_effect=spawn):
+            await login_chatgpt()
+
+    async def test_parallel_logins_have_one_credential_writer(self):
+        first_started, release = asyncio.Event(), asyncio.Event()
+        count = 0
+
+        async def spawn(*args, **kwargs):
+            nonlocal count
+            count += 1
+            process = SimpleNamespace(returncode=0)
+
+            async def wait():
+                first_started.set()
+                await release.wait()
+                return 0
+
+            process.wait = wait
+            return process
+
+        with patch('vlt.session.codex_rpc._spawn_codex', side_effect=spawn):
+            first = asyncio.create_task(login_chatgpt())
+            await first_started.wait()
+            second = asyncio.create_task(login_chatgpt())
+            try:
+                await asyncio.sleep(0.06)
+                self.assertEqual(count, 1, 'two CLI processes can replace the same credentials')
+            finally:
+                release.set()
+                await asyncio.gather(first, second)
 
     async def test_cached_login_status_requires_chatgpt_and_uses_isolated_store(self):
         from vlt.session import codex_rpc
