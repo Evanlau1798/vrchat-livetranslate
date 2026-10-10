@@ -80,13 +80,16 @@ class GuiLoginTests(unittest.TestCase):
                 closed.set()
 
         gui = SimpleNamespace(_provider=lambda: 'chatgpt', _set_status=Mock(), _q=queue.Queue(),
-                              _close_proxy=Mock(), _sync_engine_ctx=Mock(), _engine_ctx=None)
+                              _close_proxy=Mock(), _close_proxy_hint=Mock(),
+                              _sync_engine_ctx=Mock(), _engine_ctx=None)
         with patch('vlt.session.codex_rpc.login_chatgpt', side_effect=login), \
              patch.object(gui_mod.gui_engine, 'on_close'):
             try:
                 gui_chatgpt.open_signup(gui)
                 self.assertTrue(started.wait(2))
                 gui_mod.TranslationGUI._on_close(gui)
+                gui._close_proxy_hint.assert_called_once_with()
+                gui._close_proxy.assert_called_once_with()
                 self.assertTrue(closed.wait(2), 'window close left login running')
             finally:
                 if owner and not closed.is_set():

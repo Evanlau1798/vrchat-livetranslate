@@ -124,12 +124,12 @@ export class Room {
     if (size > MAX_FRAME_BYTES) {
       return this.sendErr(ws, "bad_frame", `帧超过 ${MAX_FRAME_BYTES} 字节`);
     }
-    const raw = typeof message === "string" ? message : new TextDecoder().decode(message);
     let frame;
     try {
+      const raw = typeof message === "string" ? message : new TextDecoder("utf-8", {fatal: true}).decode(message);
       frame = JSON.parse(raw);
     } catch {
-      return this.sendErr(ws, "bad_frame", "不是合法 JSON");
+      return this.sendErr(ws, "bad_frame", "不是合法 UTF-8 JSON");
     }
     if (!frame || typeof frame !== "object" || typeof frame.t !== "string") {
       return this.sendErr(ws, "bad_frame", "帧里缺 t（帧类型）");

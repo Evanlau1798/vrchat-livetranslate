@@ -391,6 +391,9 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 "passthrough_buffer_ms": _int_clamped(
                     raw_proxy.get("passthrough_buffer_ms", 150), 150,
                     key="output.audio.proxy.passthrough_buffer_ms", lo=60, hi=500),
+                # 「首次启用说明已弹过」标记：程序自己维护（见 gui_proxy_hint），用户不用管。
+                # 放在配置里而不是内存/状态文件：用户换机拷配置时不该再被弹一次。
+                "hint_shown": bool(raw_proxy.get("hint_shown", False)),
             },
         },
         "capture": {
@@ -430,6 +433,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 # 流式合成（SSE）：首段音频 0.36~0.42s 就能起播（整段合成要等 1.6~1.9s 才开口）
                 "stream": bool((raw_textin.get("tts") or {}).get("stream", True)),
                 "timeout_s": float((raw_textin.get("tts") or {}).get("timeout_s", 30.0)),
+                "reuse_conn": bool((raw_textin.get("tts") or {}).get("reuse_conn", True)),
             },
         },
     )

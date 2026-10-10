@@ -533,6 +533,7 @@ def test_connect_and_welcome() -> None:
     with relay_ctx() as r:
         with client_ctx(r, "小明") as (client, rec):
             wait_online(client)
+            wait_until(lambda: client.state().peer_count == 1, "首次成员表应包含自己")
             st = client.state()
             assert st.conn is ConnectionState.ONLINE
             assert st.room_code == TEST_ROOM and st.nickname == "小明"
@@ -543,6 +544,7 @@ def test_connect_and_welcome() -> None:
             assert hello["t"] == FRAME_HELLO and hello["room"] == TEST_ROOM
             assert hello["nick"] == "小明" and hello["ts"] > 0, hello
             assert "tok" not in hello, "没令牌时不该在帧里留个空 tok"
+            wait_until(lambda: "已进房" in rec.status(), "进房成功状态回调")
             assert "已进房" in rec.status(), f"进房成功该给一条状态：{rec.status()!r}"
             assert client._thread is not None and client._thread.is_alive()
             assert st.peer_count == 1, f"应看到自己 1 人：{st.peers}"

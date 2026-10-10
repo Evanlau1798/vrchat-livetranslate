@@ -1333,6 +1333,7 @@ class Engine:
                 api_key=str(self._cfg.session_base.get("api_key") or ""),
                 language=d.target_lang,
                 timeout=float(tts_cfg.get("timeout_s", DEFAULT_TTS_TIMEOUT_S)),
+                reuse_conn=bool(tts_cfg.get("reuse_conn", True)),
                 # 多模态地址同样按线路派生；整段/流式两条路共用这份 kw，故都带上 endpoint。
                 endpoint=self._tts_endpoint,
             )
@@ -1350,9 +1351,11 @@ class Engine:
                     spoke_s = len(pcm24) / 2 / 24000
             except TtsError as exc:
                 self._events.on_status("warn", f"打字译音失败：{exc}（文字输出不受影响）")
+                return
             except Exception as exc:  # noqa: BLE001
                 self._events.on_status("warn",
                     f"打字译音异常：{type(exc).__name__}: {exc}（文字输出不受影响）")
+                return
 
         tail = f"，已出声 {spoke_s:.1f}s" if spoke_s else ""
         self._events.on_status("info", f"打字已送出（{len(text)} 字 → {d.target_lang}{tail}）")

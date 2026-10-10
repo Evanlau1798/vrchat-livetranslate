@@ -26,6 +26,8 @@ from typing import Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from .tts_transport import _Response, _post_pooled, _close_pooled, _FramingError, _PostOutcomeUnknown  # noqa: F401
+
 ENDPOINT = "https://maas.qianwenaiapi.com/api/v1/services/aigc/multimodal-generation/generation"
 DEFAULT_MODEL = "qwen3-tts-flash"
 DEFAULT_VOICE = "Cherry"
@@ -46,14 +48,50 @@ LANG_NAMES = {
 }
 
 _opener = None
+_DEFAULT_OPENER = None        # 模块自建的那个 opener（被替换过就不走连接池，见 _pool_allowed）
 
 
 def _get_opener():
     """直连 opener（禁用系统代理）——与 textin 同一取舍：国内端点走代理是纯负担。"""
-    global _opener
+    global _opener, _DEFAULT_OPENER
     if _opener is None:
         _opener = build_opener(ProxyHandler({}))
+        _DEFAULT_OPENER = _opener
     return _opener
+
+
+def _open_response(req, timeout: float, *, reuse_conn: bool):
+    """取响应：优先池化复用；只有发送前连接失败或幂等下载才能回退直连。
+
+    回退与重连都留痕（本仓库约定：禁静默降级）。`reuse_conn=False` 时与以前**完全一致**。
+    """
+    if reuse_conn and _pool_allowed():
+        try:
+            resp, conn, key = _post_pooled(req, timeout, _note)
+            return _Response(resp, conn, key)
+        except HTTPError:
+            raise
+        except (_FramingError, _PostOutcomeUnknown) as exc:
+            raise TtsError(f"HTTP 请求失败，未自动重送：{exc}") from exc
+        except Exception as exc:                              # noqa: BLE001
+            _note(f"连接复用不可用（{type(exc).__name__}: {exc}）→ 本次回退直连")
+    return _Response(_get_opener().open(req, timeout=timeout))
+
+
+def _pool_allowed() -> bool:
+    """是否允许走连接池。
+
+    规则：**取 opener 的路径被替换过就不池化**。两种替换方式都要挡住：
+      * `module._opener = fake`（直接塞 opener）；
+      * `module._get_opener = lambda: fake`（换掉取 opener 的函数）。
+    替换者（用例里的假 opener、或别的接管 HTTP 层的代码）期望自己看到每一个请求；
+    池化会绕过它 —— 实测后果是打了假 opener 的用例直接打到真端点上去（401）。
+    """
+    return (_get_opener is _DEFAULT_GET_OPENER
+            and (_opener is None or _opener is _DEFAULT_OPENER))
+
+
+_DEFAULT_GET_OPENER = _get_opener      # 供上面的守卫比对（模块导入时就固定下来）
 
 
 class TtsError(RuntimeError):
@@ -102,16 +140,16 @@ def _decode_to_24k_mono(raw: bytes) -> bytes:
         raise TtsError(f"音频解码失败：{type(exc).__name__}: {exc}") from exc
 
 
-def _fetch(url: str, timeout: float) -> bytes:
+def _fetch(url: str, timeout: float, *, reuse_conn: bool = True) -> bytes:
     req = Request(url, headers={"Accept": "*/*"})
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             return r.read()
     except (HTTPError, URLError) as exc:
         raise TtsError(f"下载音频失败：{exc}") from exc
 
 
-def _extract_audio(obj: dict, timeout: float) -> bytes:
+def _extract_audio(obj: dict, timeout: float, *, reuse_conn: bool = True) -> bytes:
     """从响应体里取音频原始字节：优先 base64 的 `data`，退回 `url` 下载。"""
     audio = (obj.get("output") or {}).get("audio") or {}
     if audio.get("data"):
@@ -120,7 +158,7 @@ def _extract_audio(obj: dict, timeout: float) -> bytes:
         except Exception as exc:  # noqa: BLE001
             raise TtsError(f"base64 音频解析失败：{exc}") from exc
     if audio.get("url"):
-        return _fetch(str(audio["url"]), timeout)      # URL 有有效期，能不用就不用
+        return _fetch(str(audio["url"]), timeout, reuse_conn=reuse_conn)   # URL 有有效期，能不用就不用
     return b""
 
 
@@ -142,6 +180,7 @@ def _chunk_to_pcm(chunk: bytes) -> bytes:
 def synthesize(
     text: str,
     *,
+    reuse_conn: bool = True,
     voice: str = DEFAULT_VOICE,
     model: str = DEFAULT_MODEL,
     api_key: str = "",
@@ -173,7 +212,7 @@ def synthesize(
                   headers={"Authorization": f"Bearer {api_key}",
                            "Content-Type": "application/json"}, method="POST")
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             body = r.read().decode("utf-8", "replace")
     except HTTPError as exc:
         detail = ""
@@ -192,7 +231,7 @@ def synthesize(
     except Exception as exc:  # noqa: BLE001
         raise TtsError(f"响应解析失败：{exc}") from exc
     _raise_if_error(resp)
-    raw = _extract_audio(resp, timeout)
+    raw = _extract_audio(resp, timeout, reuse_conn=reuse_conn)
     if not raw:
         raise TtsError("服务端没返回音频")
     return _decode_to_24k_mono(raw)
@@ -201,6 +240,7 @@ def synthesize(
 def synthesize_stream(
     text: str,
     *,
+    reuse_conn: bool = True,
     voice: str = DEFAULT_VOICE,
     model: str = DEFAULT_MODEL,
     api_key: str = "",
@@ -246,7 +286,7 @@ def synthesize_stream(
     got = 0
     acc = bytearray()          # 已发出的音频（用来识别末尾那片「整段汇总」）
     try:
-        with _get_opener().open(req, timeout=timeout) as resp:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as resp:
             ctype = str(resp.headers.get("Content-Type", "") or "")
             if "event-stream" not in ctype:            # 服务端降级成了整段响应
                 _note(f"服务端没按 SSE 回（Content-Type={ctype!r}）→ 退回整段合成")
@@ -255,7 +295,7 @@ def synthesize_stream(
                 except Exception as exc:  # noqa: BLE001
                     raise TtsError(f"响应解析失败：{exc}") from exc
                 _raise_if_error(obj)
-                raw = _extract_audio(obj, timeout)
+                raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
                 if raw:
                     # ⚠️ 顺序不能反：**先解码成功、再算「已送出」**。曾经先 `got += 1` 再 yield，
                     # 解码一失败就报「已保留 1 个分片（少半句、不整句丢）」—— 可实际上一个字
@@ -277,7 +317,7 @@ def synthesize_stream(
                     except Exception:                       # noqa: BLE001
                         continue                            # 非 JSON 的分片直接跳过
                     _raise_if_error(obj)
-                    raw = _extract_audio(obj, timeout)
+                    raw = _extract_audio(obj, timeout, reuse_conn=reuse_conn)
                     if not raw:
                         continue
                     pcm = _chunk_to_pcm(raw)
@@ -312,7 +352,7 @@ def synthesize_stream(
         _note(f"服务端不认流式（HTTP {exc.code}）→ 退回整段合成")
         try:
             yield synthesize(text, voice=voice, model=model, api_key=api_key,
-                             language=language, timeout=timeout, endpoint=endpoint)
+                             language=language, timeout=timeout, endpoint=endpoint, reuse_conn=reuse_conn)
         except TtsError:
             raise err from exc
         return
@@ -328,12 +368,13 @@ def synthesize_stream(
     if not got:                                             # 流式没给东西 → 整段兜底
         _note("流式一个分片都没拿到 → 退回整段合成")
         yield synthesize(text, voice=voice, model=model, api_key=api_key,
-                         language=language, timeout=timeout, endpoint=endpoint)
+                         language=language, timeout=timeout, endpoint=endpoint, reuse_conn=reuse_conn)
 
 
 def synthesize_omni(
     text: str,
     *,
+    reuse_conn: bool = True,
     voice: str = DEFAULT_OMNI_VOICE,
     model: str = DEFAULT_OMNI_MODEL,
     api_key: str = "",
@@ -376,7 +417,7 @@ def synthesize_omni(
                            "Accept": "text/event-stream"}, method="POST")
     b64: list[str] = []
     try:
-        with _get_opener().open(req, timeout=timeout) as r:
+        with _open_response(req, timeout, reuse_conn=reuse_conn) as r:
             for raw_line in r:                        # 逐行读 SSE
                 line = raw_line.decode("utf-8", "replace").strip()
                 if not line.startswith("data:"):

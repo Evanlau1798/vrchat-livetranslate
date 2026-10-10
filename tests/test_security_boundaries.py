@@ -20,6 +20,34 @@ from vlt.room.model import RoomConfig
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_malformed_sensitive_configuration_is_never_logged(self):
+        secret = 9876543210123456789
+        inputs = [{'token': secret}, {'token': [str(secret)]},
+                  {'server_url': {'url': f'wss://example.invalid/?token={secret}'}},
+                  [{'token': secret}]]
+        for raw in inputs:
+            with self.subTest(raw_type=type(raw).__name__):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    RoomConfig.from_dict(raw)
+                self.assertNotIn(str(secret), output.getvalue())
+                self.assertIn('非法', output.getvalue())
+
+    def test_invalid_ports_are_rejected_before_a_thread_starts(self):
+        for authority in ('example.invalid:bad', 'example.invalid:65536',
+                          'example.invalid:-1', 'example.invalid:0', '[::1]suffix:80'):
+            cfg = RoomConfig(server_url=f'wss://{authority}/ws', room_code='ABCD1234')
+            with self.subTest(authority=authority), \
+                 patch('vlt.room.client.threading.Thread') as thread, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                client = RoomClient(cfg, lambda _: None)
+                client.start()
+                thread.assert_not_called()
+                self.assertEqual(cfg.unavailable_reason(), 'server_url 格式无效')
+        for authority in ('example.invalid:443', '[::1]:12345'):
+            self.assertIsNone(RoomConfig(server_url=f'wss://{authority}/ws',
+                                         room_code='ABCD1234').unavailable_reason())
+
     def test_only_loopback_may_use_plaintext(self):
         for host in ('example.invalid', '192.168.1.1', 'localhost.evil.invalid'):
             self.assertIsNotNone(RoomConfig(server_url=f'ws://{host}/ws',

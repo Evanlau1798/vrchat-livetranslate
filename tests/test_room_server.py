@@ -35,6 +35,16 @@ for(const type of ['ping','hello','unknown']){
   for(let i=0;i<50;i++)await c.room.webSocketMessage(c.ws,JSON.stringify({t:type,room:'ABCD1234'}));
   assert.equal(c.sent.filter(x=>x.code==='rate').length,30,`${type} must count toward inbound rate`);
 }
+{
+  const c=make();
+  const prefix=new TextEncoder().encode('{"t":"ping","pad":"');
+  const suffix=new TextEncoder().encode('"}');
+  const invalid=new Uint8Array([...prefix,0xff,...suffix]);
+  await c.room.webSocketMessage(c.ws,invalid.buffer);
+  assert.equal(c.sent.pop().code,'bad_frame','Invalid UTF-8 must not become replacement text');
+  await c.room.webSocketMessage(c.ws,new TextEncoder().encode('{"t":"ping","pad":"測試日本語"}').buffer);
+  assert.equal(c.sent.pop().t,'pong','Valid UTF-8 must keep working after rejection');
+}
 console.log('Actual Room UTF-8 and total inbound limits PASS');
 '''
         uri = (Path(__file__).resolve().parents[1]/'server/src/room.js').as_uri()

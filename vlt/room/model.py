@@ -31,7 +31,10 @@ def log(msg: str) -> None:
 
 def _warn(key: str, raw: Any, why: str, default: Any) -> Any:
     """脏值留痕并回落默认（对齐 `vlt/config.py` 的 `[config] ⚠️ ...` 口径）。"""
-    log(f"⚠️ room.{key}={raw!r} 非法（{why}）→ 回落默认值 {default!r}")
+    if key in ("token", "server_url", "<整段>"):
+        log(f"⚠️ room.{key}=<已隐藏> 非法（{why}，类型 {type(raw).__name__}）→ 回落默认值")
+    else:
+        log(f"⚠️ room.{key}={raw!r} 非法（{why}）→ 回落默认值 {default!r}")
     return default
 
 
@@ -268,6 +271,13 @@ class RoomConfig:
             url.encode('utf-8')
             parsed = urlsplit(url)
             host = parsed.hostname
+            port = parsed.port
+            if port is not None and port == 0:
+                return "server_url 格式无效"
+            if parsed.netloc.startswith('['):
+                tail = parsed.netloc.partition(']')[2]
+                if tail and not tail.startswith(':'):
+                    return "server_url 格式无效"
             if not host or parsed.username or parsed.password:
                 return "server_url 必须包含主机名，不能包含登录凭据"
             if parsed.scheme == 'ws':
