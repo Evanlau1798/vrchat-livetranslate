@@ -8,6 +8,14 @@ from .config_io import _fmt_scalar, _write_config_text, _yaml_set_or_create
 from .output.overlay import OverlayConfig
 from .i18n import t
 from .gui_engine_context import EngineCtx
+from .session.chatgpt_output import allowed, combined, scope
+
+
+def _approved_rows(bubbles):
+    rows = [b for b in bubbles if allowed(getattr(b, 'approval', None), b.who)][-8:]
+    entries = [(b.who, b.source, b.text, b.label) for b in rows]
+    approval = combined((getattr(b, 'approval', None), b.who) for b in rows)
+    return entries, approval
 
 def start_overlay(ctx: EngineCtx, *, force: bool = False) -> bool:
     """按勾选状态接管 SteamVR 的手腕屏。失败只禁用这一项，绝不影响翻译。
@@ -42,8 +50,9 @@ def push_overlay(ctx: EngineCtx, force: bool = False) -> None:
     if ctx.overlay_out is None:
         return
     try:
-        entries = [(b.who, b.source, b.text, b.label) for b in ctx.bubbles[-8:]]
-        ctx.overlay_out.update_entries(entries, force=force)
+        entries, approval = _approved_rows(ctx.bubbles)
+        with scope(approval):
+            ctx.overlay_out.update_entries(entries, force=force)
     except Exception as exc:              # noqa: BLE001
         print(f"[gui] 手腕屏刷新失败：{type(exc).__name__}: {exc}", flush=True)
 
@@ -108,8 +117,9 @@ def push_desktop(ctx: EngineCtx, force: bool = False) -> None:
     if ctx.desktop_out is None:
         return
     try:
-        entries = [(b.who, b.source, b.text, b.label) for b in ctx.bubbles[-8:]]
-        ctx.desktop_out.update_entries(entries, force=force)
+        entries, approval = _approved_rows(ctx.bubbles)
+        with scope(approval):
+            ctx.desktop_out.update_entries(entries, force=force)
     except Exception as exc:              # noqa: BLE001
         print(f"[gui] 桌面字幕刷新失败：{type(exc).__name__}: {exc}", flush=True)
 

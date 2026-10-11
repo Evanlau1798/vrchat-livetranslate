@@ -194,6 +194,7 @@ class _Bubble:
     h: int = 0
     items: list = field(default_factory=list)
     label: str = ""   # 远端成员昵称：作为小字显示在气泡上方（本机气泡为空）
+    approval: object = field(default=None, repr=False, compare=False)
 
 
 class _DownloadCancelled(Exception):

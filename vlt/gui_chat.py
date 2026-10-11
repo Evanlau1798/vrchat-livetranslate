@@ -17,6 +17,7 @@ from .i18n import t
 from .gui_chat_context import ChatCtx as ChatCtx
 from .gui_chat_poll import poll as poll
 from .ui_text import _Bubble
+from .session.chatgpt_output import allowed, current
 from .ui_theme import (
     BG,
     BORDER,
@@ -41,10 +42,6 @@ from .ui_theme import (
 #    `vlt/gui_desktop.py` 里 `ui_tk.FONT_UI` 那种写法才是对的，照它来。
 from . import ui_tk
 from .ui_tk import _char_width_for, round_rect
-
-
-# ================================================================ 上下文
-
 
 
 # ================================================================ UI 构建
@@ -252,11 +249,22 @@ def on_canvas_configure(ctx: ChatCtx, root: tk.Misc, event=None) -> None:
 
 # ================================================================ 聊天气泡
 
+def _bubble_end(b: _Bubble) -> int:
+    return b.y + b.h + (8 if b.h else 0)
+
+
 def add_text(ctx: ChatCtx, source: str, text: str, is_final: bool,
              who: str = "mine", label: str = "") -> None:
     """添加/更新一条聊天气泡（流式增量就地重画，终版封口）。"""
+    approval = current()
+    if not allowed(approval, who):
+        return
     now_str = datetime.now().strftime("%H:%M:%S")
     cur = ctx.current.get(who)
+    if cur is not None and (cur.approval is not approval or not allowed(cur.approval, who)):
+        cur.final = True
+        ctx.current.pop(who, None)
+        cur = None
     if cur is not None:
         # 流式增量：就地重画同一条气泡（终版只做"封口"，绝不新插第二条）
         cur.source = source
@@ -273,10 +281,10 @@ def add_text(ctx: ChatCtx, source: str, text: str, is_final: bool,
         return
     # 没有正在刷新的气泡 → 新建
     b = _Bubble(who=who, source=source, text=text, ts=now_str,
-                final=is_final, label=label)
+                final=is_final, label=label, approval=approval)
     if not is_final:
         ctx.current[who] = b
-    b.y = (ctx.bubbles[-1].y + ctx.bubbles[-1].h + 8) if ctx.bubbles else 8
+    b.y = _bubble_end(ctx.bubbles[-1]) if ctx.bubbles else 8
     ctx.bubbles.append(b)
     if ctx.canvas is not None:
         _clear_placeholder(ctx)
@@ -294,6 +302,9 @@ def draw_bubble(ctx: ChatCtx, b: _Bubble) -> int:
     你要读的永远是下面那行大字。服务端没返回原文（或原文与译文相同）时
     只画译文，不留空行。
     """
+    if not allowed(b.approval, b.who):
+        b.items, b.h = [], 0
+        return b.y
     cv = ctx.canvas
     w = ctx.canvas_w if ctx.canvas_w > 1 else 600
     maxw = int(w * 0.62)                       # width 参数自带自动换行
@@ -353,9 +364,9 @@ def redraw_current(ctx: ChatCtx, b: _Bubble) -> None:
     """流式增量：删掉旧图元，在同一个起始 y 位置重画同一条气泡。"""
     for iid in b.items:
         ctx.canvas.delete(iid)
-    old_h = b.h
+    old_end = _bubble_end(b)
     draw_bubble(ctx, b)
-    delta = b.h - old_h
+    delta = _bubble_end(b) - old_end
     if delta:
         # 气泡长高时把下面的气泡整体下移，避免重叠
         idx = ctx.bubbles.index(b)
@@ -374,7 +385,7 @@ def trim(ctx: ChatCtx) -> None:
         old = ctx.bubbles.pop(0)
         if ctx.current.get(old.who) is old:
             ctx.current.pop(old.who, None)
-        removed += old.h + 8
+        removed += _bubble_end(old) - old.y
         for iid in old.items:
             ctx.canvas.delete(iid)
     if removed:
@@ -390,7 +401,7 @@ def update_scrollregion(ctx: ChatCtx) -> None:
     content = 8
     if ctx.bubbles:
         last = ctx.bubbles[-1]
-        content = last.y + last.h + 8
+        content = _bubble_end(last)
     h = ctx.canvas.winfo_height()
     ctx.canvas.configure(
         scrollregion=(0, 0, max(ctx.canvas_w, 1), max(content, h)))
