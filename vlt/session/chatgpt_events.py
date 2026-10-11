@@ -186,7 +186,8 @@ def _response_text(raw, expected_model):
                 items[item_id] = item
             else:
                 if (item_id not in items or item_id in completed_items
-                        or items[item_id]['type'] != item['type']):
+                        or items[item_id]['type'] != item['type']
+                        or item.get('status') not in (None, 'completed')):
                     _invalid()
                 completed_items[item_id] = item
         elif kind in ('response.output_text.delta', 'response.output_text.done',
@@ -209,6 +210,8 @@ def _response_text(raw, expected_model):
             if expected_model is not None and response.get('model') != expected_model:
                 _invalid()
             output = response.get('output')
+            if output == []:
+                output = list(completed_items.values())
             if not isinstance(output, list) or not output or len(output) > 32:
                 _invalid()
             identifiers = [_checked_item(item) for item in output]

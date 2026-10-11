@@ -63,6 +63,49 @@ class EventsTests(unittest.TestCase):
         raw = raw.replace(b'data: {', b': keepalive\r\ndata: {').replace(b'\n\n', b'\r\n\r\n')
         self.assertEqual(response_text(raw), '合法譯文')
 
+    def test_empty_terminal_output_uses_only_matched_completed_items(self):
+        events = [json.loads(block[6:]) for block in text_response('合法譯文').split(b'\n\n') if block]
+        events[-1]['response'].update(output=[], model='gpt-6-sol')
+        self.assertEqual(response_text(sse(*events), expected_model='gpt-6-sol'), '合法譯文')
+
+    def test_empty_terminal_never_substitutes_deltas_or_incomplete_items(self):
+        events = [json.loads(block[6:]) for block in text_response().split(b'\n\n') if block]
+        events[-1]['response'].update(output=[], model='gpt-6-sol')
+        incomplete = json.loads(json.dumps(events))
+        incomplete[2]['item']['status'] = 'in_progress'
+        missing = json.loads(json.dumps(events))
+        del missing[-1]['response']['output']
+        wrong_id = json.loads(json.dumps(events))
+        wrong_id[-1]['response']['id'] = 'resp_other'
+        wrong_model = json.loads(json.dumps(events))
+        wrong_model[-1]['response']['model'] = 'other'
+        for values in (events[:2] + events[3:], incomplete, missing, wrong_id, wrong_model, events[:-1]):
+            with self.subTest(), self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                response_text(sse(*values), expected_model='gpt-6-sol')
+
+    def test_done_reasoning_rejects_explicit_incomplete_status_in_both_terminal_forms(self):
+        for status in ('completed', None, 'in_progress', 'incomplete', 'failed', ''):
+            for empty in (True, False):
+                events = [json.loads(block[6:]) for block in text_response().split(b'\n\n') if block]
+                reasoning = {'type': 'reasoning', 'id': 'reason_1', 'summary': [], 'status': status}
+                events[1:1] = [{'type': 'response.output_item.added', 'item': dict(reasoning, status='in_progress')},
+                               {'type': 'response.output_item.done', 'item': reasoning}]
+                events[-1]['response']['output'] = [] if empty else [reasoning, events[-2]['item']]
+                with self.subTest(status=status, empty=empty):
+                    if status in ('completed', None):
+                        self.assertEqual(response_text(sse(*events)), 'translation')
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                            response_text(sse(*events))
+
+    def test_done_reasoning_status_can_be_omitted_when_done_event_is_matched(self):
+        events = [json.loads(block[6:]) for block in text_response().split(b'\n\n') if block]
+        reasoning = {'type': 'reasoning', 'id': 'reason_1', 'summary': []}
+        events[1:1] = [{'type': 'response.output_item.added', 'item': reasoning},
+                       {'type': 'response.output_item.done', 'item': reasoning}]
+        events[-1]['response']['output'] = []
+        self.assertEqual(response_text(sse(*events)), 'translation')
+
     def test_responses_reject_missing_completed_wrong_id_and_tool(self):
         normal = text_response()
         cases = [normal[:normal.rfind(b'data: ')],
