@@ -204,6 +204,8 @@ class VirtualMic:
         另外短句封口后可以立刻起播，不必干等 buffer_ms。
         """
         with self._lock:
+            if not self._buf:
+                self._head_started = False
             if self._buf and not self._buf[-1][1]:
                 chunk, _ = self._buf[-1]
                 self._buf[-1] = (chunk, True)
@@ -247,6 +249,14 @@ class VirtualMic:
         if self._buf_bytes >= need or idle >= PRIME_TIMEOUT_S:
             self._primed = True
 
+    def _can_drain(self, need_bytes: int) -> bool:
+        """调用方持锁：句中短分片等补齐，封句或停更后才排空尾音。"""
+        return self._primed and (
+            self._buf_bytes >= need_bytes
+            or bool(self._buf and self._buf[-1][1])
+            or time.monotonic() - self._last_push_ts >= PRIME_TIMEOUT_S
+        )
+
     def _drain(self, need_bytes: int) -> bytes:
         """从队首排空 need_bytes 字节，不足的部分补静音。**调用者必须已持有 self._lock。**
 
@@ -276,7 +286,7 @@ class VirtualMic:
             log.debug("[virtualmic] callback status: %s", status)
         with self._lock:
             self._maybe_prime()                        # 停更超时也要起播（短译音兜底）
-            if not self._primed or self._buf_bytes < need_bytes:
+            if not self._can_drain(need_bytes):
                 outdata[:] = b"\x00" * need_bytes
                 return
             outdata[:] = self._drain(need_bytes)
@@ -367,7 +377,7 @@ class PwCatVirtualMic(VirtualMic):
                 else:
                     with self._lock:
                         self._maybe_prime()
-                        if self._primed:
+                        if self._can_drain(self._chunk):
                             data = self._drain(self._chunk)
                         else:
                             data = b"\x00" * self._chunk      # 还没攒够 → 出静音（与回调一致）

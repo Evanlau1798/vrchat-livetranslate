@@ -201,10 +201,10 @@ class _TranslatedBuffer(VirtualMic):
         return True
 
     def drain_block(self, need_bytes: int) -> bytes | None:
-        """取一块译音数据；还没起播/不足则返回 None（调用方补静音）。"""
+        """取一块译音数据，尾块补静音；未起播/无数据返回 None。"""
         with self._lock:
             self._maybe_prime()
-            if not self._primed or self._buf_bytes < need_bytes:
+            if not self._can_drain(need_bytes) or self._buf_bytes == 0:
                 return None
             return self._drain(need_bytes)
 
