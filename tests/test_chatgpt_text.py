@@ -60,6 +60,15 @@ class TextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(data), {'approved_translation', 'audio_transcript', 'target_language'})
         self.assertNotIn('source', data)
 
+    async def test_translation_policy_keeps_source_objects_relationships_and_unclear_labels(self):
+        with patch('vlt.session.chatgpt_relay.request', return_value=response(
+                {'translation': 'text', 'language': 'ja'})) as call:
+            await self.relay.translate('ordinary source data', 'ja', {})
+        instructions = json.loads(call.call_args.args[1])['instructions']
+        self.assertIn('Preserve referenced objects and explicit relationships', instructions)
+        self.assertIn('Do not substitute related objects or add unstated reasons', instructions)
+        self.assertIn('Do not silently omit unclear words or labels', instructions)
+
     async def test_structural_and_language_mismatch_are_rejected(self):
         for value in ({'translation': 'text', 'language': 'en'}, {'translation': 'text', 'language': 'ja', 'extra': True},
                       {'translation': '', 'language': 'ja'}, {'translation': 'x' * 8193, 'language': 'ja'}):
