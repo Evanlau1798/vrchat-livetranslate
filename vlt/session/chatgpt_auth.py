@@ -20,15 +20,24 @@ from .chatgpt_http import request
 def auth_home():
     try:
         home = paths._user_data_dir() / 'codex'
-        if not home.is_absolute() or os.path.normcase(str(home)) != os.path.normcase(str(home.resolve())):
+        if not home.is_absolute() or '..' in home.parts:
             raise ValueError()
-        for part in (home, *home.parents):
-            if part.exists() or part.is_symlink():
-                info = part.lstat()
-                if (stat.S_ISLNK(info.st_mode) or
-                        getattr(info, 'st_file_attributes', 0) & 0x400):
-                    raise ValueError()
-        return home
+        canonical = home.resolve()
+        if os.path.normcase(str(home)) != os.path.normcase(str(canonical)):
+            anchor = next(part for part in (home, *home.parents) if part.exists())
+            resolved_anchor = anchor.resolve()
+            if (not anchor.samefile(resolved_anchor) or os.path.normcase(str(canonical)) !=
+                    os.path.normcase(str(resolved_anchor / home.relative_to(anchor)))):
+                raise ValueError()
+        # MSIX AppData 虛擬化不是 reparse；原路徑與實體路徑仍須逐層拒絕連結。
+        for candidate in (home, canonical):
+            for part in (candidate, *candidate.parents):
+                if part.exists() or part.is_symlink():
+                    info = part.lstat()
+                    if (stat.S_ISLNK(info.st_mode) or
+                            getattr(info, 'st_file_attributes', 0) & 0x400):
+                        raise ValueError()
+        return canonical
     except Exception:
         raise RuntimeError('auth-home') from None
 

@@ -2,15 +2,19 @@
 import asyncio
 import json
 import os
+import stat
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vlt.session import chatgpt_auth as auth
+
+_REAL_AUTH_HOME = auth.auth_home
 
 
 class OwnerTests(unittest.IsolatedAsyncioTestCase):
@@ -31,6 +35,45 @@ class OwnerTests(unittest.IsolatedAsyncioTestCase):
 
     def write(self):
         self.path.write_text(json.dumps(self.data), encoding='utf-8')
+
+    def test_application_namespace_redirection_uses_checked_canonical_home(self):
+        logical = self.home.parent / 'logical-app-data' / 'codex'
+        logical.mkdir(parents=True)
+        canonical = self.home
+        original = Path.resolve
+
+        def resolve(path, *args, **kwargs):
+            return canonical if path == logical else original(path, *args, **kwargs)
+
+        # MSIX can redirect AppData without marking logical ancestors as reparse points.
+        with patch.object(auth.paths, '_user_data_dir', return_value=logical.parent), \
+                patch.object(Path, 'resolve', resolve), patch.object(Path, 'samefile', return_value=True):
+            self.assertEqual(_REAL_AUTH_HOME(), canonical)
+        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), self.data)
+
+    def test_redirected_canonical_ancestor_reparse_is_rejected(self):
+        logical = self.home.parent / 'logical-app-data' / 'codex'
+        logical.mkdir(parents=True)
+        original_resolve, original_stat = Path.resolve, Path.lstat
+
+        def resolve(path, *args, **kwargs):
+            return self.home if path == logical else original_resolve(path, *args, **kwargs)
+
+        def lstat(path, *args, **kwargs):
+            if path == self.home.parent:
+                return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(auth.paths, '_user_data_dir', return_value=logical.parent), \
+                patch.object(Path, 'resolve', resolve), patch.object(Path, 'lstat', lstat), \
+                patch.object(Path, 'samefile', return_value=True):
+            with self.assertRaisesRegex(RuntimeError, '^auth-home$'):
+                _REAL_AUTH_HOME()
+
+    def test_parent_traversal_in_application_home_is_rejected(self):
+        with patch.object(auth.paths, '_user_data_dir', return_value=self.home / '..'):
+            with self.assertRaisesRegex(RuntimeError, '^auth-home$'):
+                _REAL_AUTH_HOME()
 
     async def test_hardlinked_credentials_are_rejected_before_read_or_chmod(self):
         external = self.home / 'fake-global-auth.json'
