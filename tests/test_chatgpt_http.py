@@ -1,4 +1,6 @@
 """固定目的地與錯誤邊界的離線測試，不建立連線。"""
+import io
+from email.message import Message
 import sys
 import threading
 import time
@@ -13,6 +15,104 @@ from vlt.session import chatgpt_http as http
 
 
 class HTTPTests(unittest.TestCase):
+    def test_declared_response_framing_must_be_complete(self):
+        body = b'{"text":"test"}'
+        cases = (
+            (b'Content-Length: 100', body, 'http-uncertain'),
+            (b'Content-Length: -1', body, 'http-uncertain'),
+            (b'Content-Length: nonsense', body, 'http-uncertain'),
+            (b'Content-Length : 100', body, 'http-uncertain'),
+            (b': bad', body, 'http-uncertain'),
+            (b'From ignored\r\nContent-Length: 15', body, 'http-uncertain'),
+            (b'Content-Length: 15\r\nFrom ignored', body, 'http-uncertain'),
+            (b'X(Bad): value', body, 'http-uncertain'),
+            (b'X-Bad: bad\x00value', body, 'http-uncertain'),
+            (b'Content-Length: 15\r\nContent-Length: 100', body, 'http-uncertain'),
+            (b'Content-Length: 15\r\nContent-Length: 15', body, 'http-uncertain'),
+            (b'Content-Length: 15, 15', body, 'http-uncertain'),
+            (b'Transfer-Encoding: gzip', body, 'http-uncertain'),
+            (b'Transfer-Encoding: chunked\r\nContent-Length: 15',
+             b'f\r\n' + body + b'\r\n0\r\n\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked',
+             b'f\r\n' + body + b'\r\n0\r\n\r\n', 'http-uncertain'),
+            (b'Content-Length: 15', body, None),
+            (b'Connection: close', body, None),
+            (b'Content-Length: 0', b'', None),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\n\r\n', None),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'XX0\r\n\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'+f\r\n' + body + b'\r\n0\r\n\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'0_f\r\n' + body + b'\r\n0\r\n\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f\n' + body + b'\r\n0\r\n\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f;=\r\n' + body + b'\r\n0\r\n\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\nX-Bad no colon\r\n\r\n',
+             'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\nX-Good: value\n\r\n',
+             'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\nContent-Length: 15\r\n\r\n',
+             'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f;key="a;b"\r\n' + body + b'\r\n0\r\nX-Good: value\r\n\r\n',
+             None),
+            (b'Transfer-Encoding: chunked', b'f;' + b'k' * 8192 + b'\r\n' + body + b'\r\n0\r\n\r\n',
+             'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\nX: ' + b'a' * 8192 + b'\r\n\r\n',
+             'http-size'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\n' + (b'X: ' + b'a' * 6000 + b'\r\n') * 11 + b'\r\n',
+             'http-size'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\n' + b'X: a\r\n' * 101 + b'\r\n',
+             'http-size'),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n0\r\n' + b'X: a\r\n' * 100 + b'\r\n',
+             None),
+            (b'Transfer-Encoding: chunked', b'f\r\n' + body + b'\r\n', 'http-uncertain'),
+            (b'Transfer-Encoding: chunked', b'10\r\n' + body, 'http-uncertain'),
+        )
+        for framing, payload, reason in cases:
+            with self.subTest(framing=framing, payload=payload):
+                wire = b'HTTP/1.1 200 OK\r\n' + framing + b'\r\n\r\n' + payload
+                responses = []
+                connection = Mock(response_class=http.http.client.HTTPResponse)
+
+                def receive():
+                    response = connection.response_class(
+                        SimpleNamespace(makefile=lambda *args: io.BytesIO(wire)))
+                    response.begin()
+                    responses.append(response)
+                    return response
+
+                connection.getresponse.side_effect = receive
+                with patch('http.client.HTTPSConnection', return_value=connection), \
+                     patch('threading.Timer'):
+                    if reason:
+                        with self.assertRaisesRegex(RuntimeError, '^' + reason + '$'):
+                            request('transcribe', b'data', {})
+                    else:
+                        self.assertEqual(request('transcribe', b'data', {}),
+                                         b'' if framing == b'Content-Length: 0' else body)
+                self.assertTrue(responses[0].isclosed())
+                self.assertEqual(connection.request.call_count, 1)
+                connection.close.assert_called_once()
+
+    def test_last_read_cannot_return_success_after_total_deadline(self):
+        for expired_block in (b'', b'{"text":"test"}'):
+            with self.subTest(expired_block=expired_block):
+                clock = [0]
+
+                def read(*args):
+                    clock[0] = 36
+                    return expired_block
+
+                response = Mock(status=200, length=None, headers=Message(), will_close=True)
+                response.read1.side_effect = read
+                connection = Mock()
+                connection.getresponse.return_value = response
+                with patch('http.client.HTTPSConnection', return_value=connection), \
+                     patch('time.monotonic', side_effect=lambda: clock[0]), \
+                     patch('threading.Timer'):
+                    with self.assertRaisesRegex(RuntimeError, '^http-timeout$'):
+                        request('transcribe', b'data', {})
+                response.close.assert_called_once()
+                connection.close.assert_called_once()
+
     def test_timer_callback_does_not_leak_cleanup_exceptions(self):
         connection = Mock()
         connection.getresponse.return_value = Mock(status=302)
@@ -29,7 +129,8 @@ class HTTPTests(unittest.TestCase):
         for status, reason in ((200, 'http-uncertain'), (302, 'http-rejected')):
             for failing in ('response', 'connection'):
                 with self.subTest(status=status, failing=failing):
-                    response = Mock(status=status, read1=Mock(return_value=b''))
+                    response = Mock(status=status, length=None, headers=Message(), will_close=True,
+                                    read1=Mock(return_value=b''))
                     connection = Mock()
                     connection.getresponse.return_value = response
                     target = response if failing == 'response' else connection
@@ -45,7 +146,7 @@ class HTTPTests(unittest.TestCase):
                                      (200, [b'x' * 65537], 'http-size'),
                                      (200, OSError('private-details'), 'http-uncertain')):
             with self.subTest(reason=reason):
-                connection, response = Mock(), Mock(status=status)
+                connection, response = Mock(), Mock(status=status, headers=Message(), will_close=True)
                 response.read1.side_effect = read
 
                 def detach():
@@ -60,7 +161,8 @@ class HTTPTests(unittest.TestCase):
                 connection.close.assert_called_once()
 
     def test_connection_close_body_keeps_original_socket_budget(self):
-        connection, transport, response = Mock(), Mock(), Mock(status=200)
+        connection, transport, response = Mock(), Mock(), Mock(
+            status=200, length=None, headers=Message(), will_close=True)
         response.read1.side_effect = [b'ok', b'']
         connection.sock = transport
 
@@ -118,6 +220,15 @@ class HTTPTests(unittest.TestCase):
                 request('transcribe', b'data', {'Host': 'other.example'})
         connect.assert_not_called()
 
+    def test_asr_user_agent_does_not_allow_an_arbitrary_identity_or_other_operation(self):
+        with patch('http.client.HTTPSConnection') as connect:
+            for operation, agent in (('transcribe', 'arbitrary-client'),
+                                     ('responses', 'Codex Desktop/26.429.30905'),
+                                     ('live', 'Codex Desktop/26.429.30905')):
+                with self.assertRaisesRegex(RuntimeError, '^request-invalid$'):
+                    request(operation, b'data', {'user-agent': agent})
+        connect.assert_not_called()
+
     def test_transport_exception_never_exposes_headers_or_body(self):
         connection = Mock()
         connection.request.side_effect = RuntimeError('private-secret')
@@ -128,7 +239,7 @@ class HTTPTests(unittest.TestCase):
         connection.close.assert_called_once()
 
     def test_response_is_bounded_and_connection_closed(self):
-        response = Mock(status=200)
+        response = Mock(status=200, length=None, headers=Message(), will_close=True)
         response.read1.return_value = b'x' * 8192
         connection = Mock()
         connection.getresponse.return_value = response
@@ -138,7 +249,7 @@ class HTTPTests(unittest.TestCase):
         connection.close.assert_called_once()
 
     def test_valid_body_is_read_once_without_retry(self):
-        response = Mock(status=200)
+        response = Mock(status=200, length=None, headers=Message(), will_close=True)
         response.read1.side_effect = [b'{"text":"test"}', b'']
         connection = Mock()
         connection.getresponse.return_value = response

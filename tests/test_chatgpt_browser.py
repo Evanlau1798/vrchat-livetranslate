@@ -157,5 +157,112 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 await bridge.close()
 
 
+class StartupTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.bridge = BrowserBridge(AsyncMock(), Mock(), Mock())
+        self.server = SimpleNamespace(sockets=[SimpleNamespace(getsockname=lambda: ('127.0.0.1', 12345))],
+                                      close=Mock(), wait_closed=AsyncMock())
+        self.child = SimpleNamespace(returncode=None, wait=AsyncMock(return_value=0))
+        self.child.terminate = Mock(side_effect=lambda: setattr(self.child, 'returncode', 0))
+        self.serve = AsyncMock(return_value=self.server)
+        self.spawn = AsyncMock(return_value=self.child)
+        for name, value in (('websockets.asyncio.server.serve', self.serve),
+                            ('asyncio.create_subprocess_exec', self.spawn),
+                            ('vlt.session.chatgpt_browser.browser_command', Mock(return_value='fake-browser'))):
+            guard = patch(name, new=value)
+            guard.start()
+            self.addCleanup(guard.stop)
+        self.addAsyncCleanup(self.bridge.close)
+
+    async def test_closed_bridge_never_restarts(self):
+        await self.bridge.close()
+        self.bridge.ready.set()
+        with self.assertRaisesRegex(RuntimeError, '^browser-closed$'):
+            await self.bridge.start('unused')
+        self.serve.assert_not_called()
+        self.spawn.assert_not_called()
+
+    async def test_duplicate_start_does_not_replace_server_or_child(self):
+        self.bridge.ready.set()
+        await self.bridge.start('unused')
+        with self.assertRaisesRegex(RuntimeError, '^browser-started$'):
+            await self.bridge.start('unused')
+        self.assertEqual((self.serve.call_count, self.spawn.call_count), (1, 1))
+
+    async def test_close_during_server_creation_does_not_spawn_child(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def serve(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return self.server
+
+        self.serve.side_effect = serve
+        self.bridge.ready.set()
+        starting = asyncio.create_task(self.bridge.start('unused'))
+        await entered.wait()
+        closing = asyncio.create_task(self.bridge.close())
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(starting, closing, return_exceptions=True)
+        self.spawn.assert_not_called()
+        self.server.close.assert_called_once()
+        self.assertIsInstance(starting.exception(), RuntimeError)
+
+    async def test_cancelled_start_awaits_spawn_then_reaps_child(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def spawn(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return self.child
+
+        self.spawn.side_effect = spawn
+        starting = asyncio.create_task(self.bridge.start('unused'))
+        await entered.wait()
+        starting.cancel()
+        await asyncio.sleep(.01)
+        starting.cancel()
+        await asyncio.sleep(.01)
+        try:
+            self.assertFalse(starting.done(), 'pending process creation remains owned until cleanup')
+        finally:
+            release.set()
+            await asyncio.gather(starting, return_exceptions=True)
+        self.assertTrue(starting.cancelled())
+        self.child.terminate.assert_called_once()
+        self.server.close.assert_called_once()
+
+    async def test_spawn_failure_closes_partial_server_before_propagating(self):
+        self.spawn.side_effect = OSError('fake spawn failure')
+        with self.assertRaises(OSError):
+            await self.bridge.start('unused')
+        self.server.close.assert_called_once()
+        self.server.wait_closed.assert_awaited_once()
+
+    async def test_close_during_spawn_retains_cleanup_ownership(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def spawn(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return self.child
+
+        self.spawn.side_effect = spawn
+        self.bridge.ready.set()
+        starting = asyncio.create_task(self.bridge.start('unused'))
+        await entered.wait()
+        closing = asyncio.create_task(self.bridge.close())
+        await asyncio.sleep(.01)
+        try:
+            self.assertFalse(closing.done(), 'close cannot finish before the pending child is collected')
+        finally:
+            release.set()
+            await asyncio.gather(starting, closing, return_exceptions=True)
+        self.child.terminate.assert_called_once()
+        self.server.close.assert_called_once()
+        self.assertIsInstance(starting.exception(), RuntimeError)
+
+
 if __name__ == '__main__':
     unittest.main()

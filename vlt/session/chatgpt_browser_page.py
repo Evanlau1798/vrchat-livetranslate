@@ -3,7 +3,7 @@
 PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
 <script>
 (async () => {
-  let peer, context, socket, input, sink;
+  let peer, context, socket, input, sink, capture, sealed=false;
   const fail = reason => { if(socket?.readyState === 1) socket.send(JSON.stringify({type:'error',
     reason:['input-overflow','output-backpressure'].includes(reason)?reason:'audio'})); };
   try {
@@ -23,10 +23,16 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
         if(this.phase>=1){this.phase-=1;this.previous=this.current;this.current=this.next();}}return true;}
     }
     class PCMOutput extends AudioWorkletProcessor {
-      constructor(){super();this.buffer=new Int16Array(480);this.offset=0;}
-      process(inputs,outputs){const channels=inputs[0];if(!channels?.length)return true;
+      constructor(){super();this.buffer=new Int16Array(480);this.offset=0;this.samples=0;this.sealed=false;
+        this.port.onmessage=e=>{const data=e.data;
+          if(this.sealed||data?.type!=='seal'||typeof data.seal_id!=='string'||!/^[0-9a-f]{16}$/.test(data.seal_id))return;
+          this.sealed=true;
+          if(this.offset){const tail=this.buffer.slice(0,this.offset).buffer;this.port.postMessage(tail,[tail]);this.offset=0;}
+          this.port.postMessage({type:'sealed',seal_id:data.seal_id,samples:this.samples});};}
+      process(inputs,outputs){if(this.sealed)return false;const channels=inputs[0];if(!channels?.length)return true;
         for(let i=0;i<channels[0].length;i++){let value=0;for(const channel of channels)value+=channel[i];value/=channels.length;
           this.buffer[this.offset++]=Math.round(Math.max(-1,Math.min(1,value))*32767);
+          this.samples++;
           if(this.offset===480){const buffer=this.buffer.buffer;this.port.postMessage(buffer,[buffer]);this.buffer=new Int16Array(480);this.offset=0;}}
         return true;}
     }
@@ -43,9 +49,17 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
     peer.ontrack=event=>{
       if(event.track.kind!=='audio')return;
       const stream=new MediaStream([event.track]); sink=document.createElement('audio');sink.srcObject=stream;sink.volume=0;sink.play().catch(fail);
-      const source=context.createMediaStreamSource(stream), capture=new AudioWorkletNode(context,'pcm-output'), mute=context.createGain();mute.gain.value=0;
+      if(capture){fail();return;}
+      const source=context.createMediaStreamSource(stream), mute=context.createGain();mute.gain.value=0;
+      capture=new AudioWorkletNode(context,'pcm-output');
       source.connect(capture);capture.connect(mute);mute.connect(context.destination);
-      capture.port.onmessage=e=>{if(socket.readyState!==1)return;if(socket.bufferedAmount>96000){fail('output-backpressure');return;}socket.send(e.data);};
+      capture.port.onmessage=async e=>{try{
+        if(socket.readyState!==1||sealed)throw Error();
+        if(socket.bufferedAmount>96000){fail('output-backpressure');return;}
+        if(e.data instanceof ArrayBuffer)socket.send(e.data);
+        else if(e.data?.type==='sealed'){sealed=true;await context.suspend();socket.send(JSON.stringify(e.data));}
+        else throw Error();
+      }catch{fail();}};
     };
     peer.onconnectionstatechange=()=>{
       if(peer.connectionState==='connected')socket.send(JSON.stringify({type:'ready'}));
@@ -56,6 +70,10 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>VLT audio bridge</title>
         if(event.data instanceof ArrayBuffer){input.port.postMessage(event.data,[event.data]);return;}
         const message=JSON.parse(event.data);
         if(message.type==='answer')await peer.setRemoteDescription({type:'answer',sdp:message.sdp});
+        if(message.type==='seal'){
+          if(!capture||sealed)throw Error();
+          capture.port.postMessage(message);
+        }
         if(message.type==='close'){sink?.pause();peer.close();await context.close();socket.close();window.close();}
       }catch{fail();}
     };

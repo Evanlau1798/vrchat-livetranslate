@@ -43,6 +43,8 @@ class BrowserBridge:
         self._drained = asyncio.Event()
         self._send_lock = asyncio.Lock()
         self._send_failed = False
+        self._close_task = None
+        self._open_task = None
 
     async def _http(self, connection, request):
         if request.headers.get('Host') != self.origin.removeprefix('http://'):
@@ -72,7 +74,7 @@ class BrowserBridge:
                 if isinstance(message, bytes):
                     if len(message) % 2 or len(message) > 48000:
                         raise ValueError('Invalid PCM')
-                    self.on_audio(message)
+                    self._receive_audio(message)
                     continue
                 event = json.loads(message)
                 if event.get('type') == 'offer':
@@ -97,6 +99,8 @@ class BrowserBridge:
                     self._pending_pcm -= size
                     self._consumed_pcm += size
                     self._drained.set()
+                elif not await self._receive_control(event):
+                    raise ValueError('Unexpected control event')
         except Exception:
             if failure == '背景 WebRTC 音訊橋接已關閉。':
                 failure = '背景 WebRTC 音訊橋接失敗。'
@@ -107,11 +111,49 @@ class BrowserBridge:
                 self.on_error(failure)
                 self.ready.set()
 
+    def _receive_audio(self, pcm):
+        self.on_audio(pcm)
+
+    async def _receive_control(self, event):
+        return False
+
     async def start(self, profile):
+        if self.closing:
+            raise RuntimeError('browser-closed')
+        if self._open_task is not None or self.server is not None or self.process is not None:
+            raise RuntimeError('browser-started')
+        self._open_task = asyncio.create_task(self._open(profile))
+        cancelled = False
+        while not self._open_task.done():
+            try:
+                await asyncio.shield(self._open_task)
+            except asyncio.CancelledError:
+                cancelled = True
+                self.closing = True
+            except Exception:
+                break
+        if cancelled:
+            self._open_task.exception() if not self._open_task.cancelled() else None
+            await self.close()
+            raise asyncio.CancelledError()
+        try:
+            self._open_task.result()
+            await asyncio.wait_for(self.ready.wait(), 90)  # 40s request + 30s SDP + peer setup.
+            if self.closing:
+                raise RuntimeError('browser-closed')
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _open(self, profile):
         from websockets.asyncio.server import serve
+        if self.closing:
+            raise RuntimeError('browser-closed')
         self.server = await serve(self._handle, '127.0.0.1', 0, process_request=self._http,
                                   compression=None,
                                   max_size=256000, max_queue=16, close_timeout=2)
+        if self.closing:
+            raise RuntimeError('browser-closed')
         port = self.server.sockets[0].getsockname()[1]
         self.origin = f'http://127.0.0.1:{port}'
         self.process = await asyncio.create_subprocess_exec(
@@ -120,7 +162,8 @@ class BrowserBridge:
             self.origin + '/' + self.token, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             **({'creationflags': 0x08000000} if os.name == 'nt' else {}),
         )
-        await asyncio.wait_for(self.ready.wait(), 90)  # Covers 40s request + 30s SDP + peer setup.
+        if self.closing:
+            raise RuntimeError('browser-closed')
 
     async def send(self, pcm):
         if not self.socket or self.closing or self._send_failed:
@@ -147,22 +190,40 @@ class BrowserBridge:
 
     async def close(self):
         self.closing = True
+        self.ready.set()
         self._drained.set()
-        if self.socket:
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close(asyncio.current_task()))
+        cancelled = False
+        while not self._close_task.done():
             try:
-                await self.socket.send('{"type":"close"}')
+                await asyncio.shield(self._close_task)
+            except asyncio.CancelledError:
+                cancelled = True
             except Exception:
-                pass
-        if self.server:
-            self.server.close()
-            if self.handler and self.handler is not asyncio.current_task():
-                self.handler.cancel()
-                await asyncio.gather(self.handler, return_exceptions=True)
-            await self.server.wait_closed()
-        if self.process and self.process.returncode is None:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), 3)
-            except asyncio.TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+                break
+        if cancelled:
+            self._close_task.exception() if not self._close_task.cancelled() else None
+            raise asyncio.CancelledError()
+        self._close_task.result()
+
+    async def _close(self, caller):
+        from .codex_rpc import _stop_process
+        try:
+            if self._open_task is not None:
+                await asyncio.gather(self._open_task, return_exceptions=True)
+            if self.socket:
+                try:
+                    await asyncio.wait_for(self.socket.send('{"type":"close"}'), 2)
+                except Exception:
+                    pass
+            if self.server:
+                self.server.close()
+                if self.handler and self.handler is not caller and not self.handler.done():
+                    self.handler.cancel()
+                    await asyncio.gather(self.handler, return_exceptions=True)
+                # server 的關閉 task 會收尾 caller；caller 不能反過來等自己退出。
+                if self.handler is not caller:
+                    await self.server.wait_closed()
+        finally:
+            await _stop_process(self.process)
