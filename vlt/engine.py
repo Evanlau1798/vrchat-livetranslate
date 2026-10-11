@@ -1289,7 +1289,7 @@ class Engine:
             self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
 
     def _on_audio(self, pcm: bytes) -> None:
-        if self._virtualmic is None:
+        if self._virtualmic is None or not output_allowed(output_approval(), self._direction):
             return
         self._audio_chunks += 1
         stereo = resample_24k_mono_to_48k_stereo(pcm)
