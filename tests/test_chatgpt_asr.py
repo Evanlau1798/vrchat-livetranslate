@@ -82,6 +82,24 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
                     await self.asr.source_asr(b'\x00\x00', 'zh')
 
+    async def test_bounded_asset_metadata_is_discarded_without_fetching(self):
+        response = {'text': '明天九點見。', 'asset_pointer': 'sediment://test-only',
+                    'asset_ttl': '2026-10-11T00:00:00Z', 'asset_format': 'wav'}
+        with patch('vlt.session.chatgpt_relay.request', return_value=json.dumps(response).encode()) as request:
+            self.assertEqual(await self.asr.source_asr(b'\x00\x00', 'zh'), response['text'])
+        self.assertEqual(request.call_count, 1, 'asset fields must never trigger another request')
+
+    async def test_partial_invalid_or_unrecognized_asset_schema_is_rejected(self):
+        metadata = {'asset_pointer': 'sediment://test-only', 'asset_ttl': 'soon', 'asset_format': 'wav'}
+        variants = ({'asset_pointer': 'x'}, dict(metadata, asset_pointer=[]),
+                    dict(metadata, asset_ttl='x' * 2049), dict(metadata, asset_format='wav\n'),
+                    dict(metadata, tools=[]))
+        for fields in variants:
+            with self.subTest(fields=list(fields)), \
+                    patch('vlt.session.chatgpt_relay.request', return_value=json.dumps({'text': 'ok', **fields}).encode()):
+                with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
+                    await self.asr.source_asr(b'\x00\x00', 'zh')
+
     async def test_changed_account_or_unknown_request_is_discarded_without_retry(self):
         def changed(*args):
             self.owner.generation += 1

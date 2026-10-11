@@ -117,7 +117,16 @@ class SubscriptionRelay:
             if not isinstance(raw, bytes) or len(raw) > 65536:
                 raise ValueError()
             value = bounded_json(raw)
-            if (set(value) != {'text'} or not isinstance(value['text'], str)
+            assets = {'asset_pointer', 'asset_ttl', 'asset_format'}
+            if set(value) == {'text'} | assets:
+                if any(not isinstance(value[key], str) or not value[key]
+                       or len(value[key].encode()) > 2048
+                       or any(ord(char) < 32 or ord(char) == 127 for char in value[key])
+                       for key in assets):
+                    raise ValueError()
+            elif set(value) != {'text'}:
+                raise ValueError()
+            if (not isinstance(value['text'], str)
                     or not value['text'].strip() or len(value['text'].encode()) > 8192):
                 raise ValueError()
             return value['text']
