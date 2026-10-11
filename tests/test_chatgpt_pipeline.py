@@ -111,20 +111,31 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
         async def asr(*args):
             await hold.wait()
+            hold.clear()
             return '明天九點見。'
 
         self.services.source_asr.side_effect = asr
         for _ in range(3):
             self.assertTrue(self.pipeline.submit('mine', bytes(320)))
         self.assertFalse(self.pipeline.submit('mine', bytes(320)))
-        hold.set()
         # Consume between finished jobs to keep output backpressure meaningful.
-        for _ in range(200):
-            await asyncio.sleep(0)
-            self.consume()
+        for _ in range(3):
+            hold.set()
+            await self.settle()
+            self.assertTrue(self.consume())
         self.assertEqual(len(self.text), 3, 'real repeated source sections must each be released')
         self.assertEqual(len(self.audio), 3)
         self.assertTrue(any(c.args[-1] == 'queue-overload' for c in self.reasons.call_args_list))
+
+    async def test_completed_output_queue_is_bounded_without_a_consumer(self):
+        for _ in range(3):
+            self.assertTrue(self.pipeline.submit('mine', bytes(320)))
+        await asyncio.gather(*tuple(self.pipeline._owned))
+        self.assertEqual(len(self.pipeline._ready['mine']), 2)
+        self.assertIn('output-overload', [call.args[2] for call in self.reasons.call_args_list])
+        self.assertTrue(self.consume())
+        self.assertTrue(self.consume())
+        self.assertFalse(self.consume())
 
     async def test_old_queued_results_account_and_language_changes_are_dropped(self):
         for change in (lambda: setattr(self, 'account', self.account + 1),
@@ -206,21 +217,26 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.consume(), 'same approved PCM hash is checked again at dequeue')
 
     async def test_stage_cannot_turn_timeout_cancellation_into_an_approved_result(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+
         async def overdue(*args):
+            entered.set()
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
+                cancelled.set()
                 return '明天九點見。'
 
         self.services.source_asr.side_effect = overdue
-        finished = asyncio.Event()
-        self.reasons.side_effect = lambda *args: finished.set()
-        with patch.object(pipeline_mod, '_STAGE_TIMEOUT', .02):
+        loop = asyncio.get_running_loop()
+        # A coarse Windows clock may dispatch timers before their nominal deadline.
+        with patch.object(loop, '_clock_resolution', .05), patch.object(pipeline_mod, '_STAGE_TIMEOUT', .02):
             self.pipeline.submit('mine', bytes(320))
-            await self.settle()
-            await asyncio.sleep(.05)
+            await entered.wait()
+            await cancelled.wait()
+            await asyncio.gather(*tuple(self.pipeline._owned))
             self.assertEqual(self.services.translate.call_count, 0, 'late source must not start translation')
-            self.assertTrue(finished.is_set())
+            self.assertIn('source-asr-timeout', [call.args[2] for call in self.reasons.call_args_list])
         self.assertFalse(self.consume())
 
     async def test_stop_between_caption_and_audio_prevents_late_playback(self):

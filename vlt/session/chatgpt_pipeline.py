@@ -167,14 +167,15 @@ class Coordinator:
             raise _Rejected('stale-result')
         deadline = asyncio.get_running_loop().time() + _STAGE_TIMEOUT
         try:
-            result = await asyncio.wait_for(operation(*args), _STAGE_TIMEOUT)
+            async with asyncio.timeout(_STAGE_TIMEOUT) as timer:
+                result = await operation(*args)
         except asyncio.TimeoutError:
             raise _Rejected(name + '-timeout') from None
         except asyncio.CancelledError:
             raise
         except Exception:
             raise _Rejected(name + '-failed') from None
-        if asyncio.get_running_loop().time() >= deadline:
+        if timer.expired() or asyncio.get_running_loop().time() >= deadline:
             raise _Rejected(name + '-timeout')
         if not self._valid(section):
             raise _Rejected('stale-result')
