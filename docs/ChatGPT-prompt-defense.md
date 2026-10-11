@@ -28,6 +28,8 @@ Live 建立连接的离线传输只接受创建状态与单一、符合固定路
 
 [逐段 coordinator](../vlt/session/chatgpt_pipeline.py)用假的服务 stages 验证两方向独立排队、每方向一段处理中及两段等待、停止与过期结果清理、核准后恰好输出一次，以及实际消费队列时再次核对世代和音频哈希。任一方向改变语言或账户改变，都使旧结果失效；取消尚未完成时不在该方向叠加新请求。纯字幕只进行来源 ASR、翻译与文字校验；字幕和译音模式在完整候选的盲 ASR 与音频核对通过后才共同放行。盲 ASR 不取得核准译文，显示用的简繁转换放在校验之后。
 
+后续离线重放使用已保存的实际 PCM 与服务校验结果，在 coordinator 消费入口验证：完整校验返回前没有字幕或音频回调；正常候选之后恰好输出一次，字节、长度与哈希保持一致；额外内容与缺尾候选两个回调均为零。历史文字校验只有单一核准字段，先按当前契约重新校验，没有用默认值补齐缺失字段。此重放只覆盖 coordinator 的回调边界，未经过正式 GUI 队列、音频设备或播放，也不替代最新候选的联合验收。
+
 这些离线测试证明编排和拒绝流程，不证明模型校验结果正确，也没有证明现有 GUI、overlay、chatbox、虚拟麦或房间的全部队列已接上新闸门。订阅 ASR、文字模型及 Live 的正式 adapter、工具所有权、真实候选完成契约、正常联合验收和全出口接入仍是未完成项。正式服务门槛未成立前，不扩大依赖它的实机验收，也不恢复 Ready。
 
 官方[会话说明](https://developers.openai.com/api/docs/guides/live-conversations)要求将转录时间与实际音频分开：WebSocket 音频增量没有时间字段或音频完成事件，WebRTC 则通过媒体轨道送音。`session.closed` 可用于会话收尾；它与本地 seal ACK 仍不能单独证明私有订阅路线的完整 PCM 已到达。公开的 [Sign in with ChatGPT 预览限制](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)也明确不支持该公开流程的音频输入及转录 API，不能把公开授权说明直接当作私有语音端点的适用契约。
