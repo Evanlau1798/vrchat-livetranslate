@@ -15,6 +15,92 @@ from vlt.session import chatgpt_http as http
 
 
 class HTTPTests(unittest.TestCase):
+    def test_live_creation_returns_only_the_fixed_sideband_destination(self):
+        for location in ('/v1/live/rtc_test', '/v1/realtime/calls/rtc_test',
+                         '/v1/realtime/calls/calls/rtc_test',
+                         'https://api.openai.com/v1/live/rtc_test'):
+            with self.subTest(location=location):
+                headers = Message()
+                headers['Location'] = location
+                response = Mock(status=201, length=None, headers=headers, will_close=True)
+                response.read1.side_effect = [b'v=0\r\n', b'']
+                connection = Mock()
+                connection.getresponse.return_value = response
+                with patch('http.client.HTTPSConnection', return_value=connection) as connect, patch('threading.Timer'):
+                    self.assertEqual(request('live', b'{}', {'openai-alpha': 'quicksilver=v2'}),
+                                     (b'v=0\r\n', 'wss://api.openai.com/v1/live/rtc_test'))
+                self.assertEqual(connect.call_args.args, ('chatgpt.com',))
+                connection.request.assert_called_once_with('POST',
+                    '/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas',
+                    body=b'{}', headers={'openai-alpha': 'quicksilver=v2'})
+                response.close.assert_called_once()
+                connection.close.assert_called_once()
+
+    def test_live_creation_parses_real_201_headers_and_framing(self):
+        body = b'v=0\r\n'
+        for location, length, reason in (
+                (b'Location: /v1/live/rtc_test', len(body), None),
+                (b'Location: /v1/live/rtc_test\r\nLocation: /v1/live/rtc_test', len(body), 'http-uncertain'),
+                (b'Location: https://evil.example/v1/live/rtc_test', len(body), 'http-uncertain'),
+                (b'Location: /v1/live/rtc_test', 100, 'http-uncertain')):
+            with self.subTest(location=location, length=length):
+                wire = (b'HTTP/1.1 201 Created\r\n' + location + b'\r\nContent-Length: ' +
+                        str(length).encode() + b'\r\n\r\n' + body)
+                connection = Mock()
+                response = http._Response(SimpleNamespace(makefile=lambda *args: io.BytesIO(wire)))
+                response.begin()
+                connection.getresponse.return_value = response
+                with patch('http.client.HTTPSConnection', return_value=connection) as connect, patch('threading.Timer'):
+                    if reason:
+                        with self.assertRaisesRegex(RuntimeError, '^' + reason + '$'):
+                            request('live', b'{}', {'openai-alpha': 'quicksilver=v2'})
+                    else:
+                        self.assertEqual(request('live', b'{}', {'openai-alpha': 'quicksilver=v2'}),
+                                         (body, 'wss://api.openai.com/v1/live/rtc_test'))
+                self.assertEqual(connect.call_args.args, ('chatgpt.com',))
+                connection.request.assert_called_once_with('POST',
+                    '/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas',
+                    body=b'{}', headers={'openai-alpha': 'quicksilver=v2'})
+                self.assertTrue(response.isclosed())
+                connection.close.assert_called_once()
+
+    def test_live_creation_rejects_missing_duplicate_or_untrusted_location(self):
+        for locations in ([], ['/v1/live/rtc_test'] * 2, ['https://evil.example/v1/live/rtc_test'],
+                          ['https://api.openai.com:443/v1/live/rtc_test'],
+                          ['//api.openai.com/v1/live/rtc_test'], ['http://api.openai.com/v1/live/rtc_test'],
+                          ['/v1/live/rtc_test?x=y'], ['/v1/live/rtc_test#x'],
+                          ['/v1/live/../rtc_test'], ['/v1/live/%72tc_test'],
+                          ['/v1/live/a/b'], ['/v1/live/'], ['/v1/live/' + 'a' * 129],
+                          [' /v1/live/rtc_test'], ['https://user@api.openai.com/v1/live/rtc_test']):
+            with self.subTest(locations=locations):
+                headers = Message()
+                for location in locations:
+                    headers['Location'] = location
+                response = Mock(status=201, headers=headers)
+                connection = Mock()
+                connection.getresponse.return_value = response
+                with patch('http.client.HTTPSConnection', return_value=connection), patch('threading.Timer'):
+                    with self.assertRaisesRegex(RuntimeError, '^http-uncertain$'):
+                        request('live', b'{}', {})
+                response.read1.assert_not_called()
+                response.close.assert_called_once()
+
+    def test_live_headers_and_creation_status_do_not_expand_other_operations(self):
+        with patch('http.client.HTTPSConnection') as connect:
+            for operation, value in (('live', 'arbitrary'), ('responses', 'quicksilver=v2'),
+                                     ('transcribe', 'quicksilver=v2')):
+                with self.assertRaisesRegex(RuntimeError, '^request-invalid$'):
+                    request(operation, b'{}', {'openai-alpha': value})
+            connect.assert_not_called()
+        for operation, status in (('live', 200), ('live', 202), ('live', 302), ('responses', 201)):
+            connection = Mock()
+            connection.getresponse.return_value = Mock(status=status)
+            with self.subTest(operation=operation, status=status), \
+                 patch('http.client.HTTPSConnection', return_value=connection), patch('threading.Timer'):
+                with self.assertRaisesRegex(RuntimeError, '^http-rejected$'):
+                    request(operation, b'{}', {})
+                self.assertEqual(connection.request.call_count, 1)
+
     def test_declared_response_framing_must_be_complete(self):
         body = b'{"text":"test"}'
         cases = (

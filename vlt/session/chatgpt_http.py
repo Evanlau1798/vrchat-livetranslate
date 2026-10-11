@@ -15,7 +15,8 @@ _OPERATIONS = {
     'responses': ('chatgpt.com', '/backend-api/codex/responses?client_version=0.162.0', 256000, 65536),
     'live': ('chatgpt.com', '/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas', 256000, 400000),
 }
-_HEADERS = {'authorization', 'chatgpt-account-id', 'content-type', 'accept', 'openai-beta', 'originator', 'user-agent'}
+_HEADERS = {'authorization', 'chatgpt-account-id', 'content-type', 'accept', 'openai-beta',
+            'originator', 'user-agent', 'openai-alpha'}
 
 
 class _HTTPFailure(RuntimeError):
@@ -116,6 +117,9 @@ def request(operation, body, headers):
     if any(k.lower() == 'user-agent' and
            (operation != 'transcribe' or v != 'Codex Desktop/26.429.30905') for k, v in headers.items()):
         raise RuntimeError('request-invalid')
+    if any(k.lower() == 'openai-alpha' and
+           (operation != 'live' or v != 'quicksilver=v2') for k, v in headers.items()):
+        raise RuntimeError('request-invalid')
     host, path, limit, body_limit = _OPERATIONS[operation]
     if len(body) > body_limit:
         raise RuntimeError('request-invalid')
@@ -151,12 +155,21 @@ def request(operation, body, headers):
         connection.request('POST', path, body=body, headers=headers)
         transport.settimeout(_remaining(deadline))
         response = connection.getresponse()
-        if response.status != 200:
+        if response.status != (201 if operation == 'live' else 200):
             raise _HTTPFailure('http-rejected')
         if (response.headers.defects or response.headers.get_unixfrom() or response.headers.get_payload() or any(
                 _TRAILER.fullmatch((k + ':' + v + '\r\n').encode('latin-1')) is None
                 for k, v in response.headers.items())):
             raise _HTTPFailure('http-uncertain')
+        sideband = None
+        if operation == 'live':
+            locations = response.headers.get_all('Location', [])
+            match = (re.fullmatch(r'(?:https://api\.openai\.com)?/v1/'
+                                 r'(?:live|realtime/calls(?:/calls)?)/([A-Za-z0-9_-]{1,128})', locations[0])
+                     if len(locations) == 1 else None)
+            if match is None:
+                raise _HTTPFailure('http-uncertain')
+            sideband = 'wss://api.openai.com/v1/live/' + match[1]
         lengths = response.headers.get_all('Content-Length', [])
         encodings = response.headers.get_all('Transfer-Encoding', [])
         if (len(lengths) > 1 or len(encodings) > 1 or lengths and encodings or
@@ -177,7 +190,7 @@ def request(operation, body, headers):
             if not block:
                 if response.length not in (None, 0):
                     raise _HTTPFailure('http-uncertain')
-                return bytes(raw)
+                return (bytes(raw), sideband) if operation == 'live' else bytes(raw)
             raw.extend(block)
             if len(raw) > limit:
                 raise _HTTPFailure('http-size')
