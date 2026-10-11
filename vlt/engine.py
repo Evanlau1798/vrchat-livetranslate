@@ -1,7 +1,4 @@
-"""可编程引擎：把 app.py 的「会话 + 节流器 + chatbox + overlay」组装抽成可启停的引擎。
-
-GUI 与 CLI 共用同一个 Engine 类；区别只在事件回调和音频源。
-"""
+"""供 GUI 和 CLI 启停的引擎：组装会话、节流器、chatbox 和 overlay。"""
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +28,7 @@ from .output.merger import Merger
 from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
 from .session.base import SessionConfig, TextDelta, create_session
+from .session.chatgpt_output import allowed as output_allowed, current as output_approval
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
 from .textin import DEFAULT_TIMEOUT_S as DEFAULT_TEXT_TIMEOUT_S
 from .textin import TextTranslateError, split_for_chatbox, terms_from_mapping, translate_text
@@ -1206,7 +1204,8 @@ class Engine:
 
     def _on_text(self, d: TextDelta) -> None:
         text = d.display
-        if self._swallow_repeat(d, text):
+        approval = output_approval()
+        if not output_allowed(approval, self._direction) or (approval is None and self._swallow_repeat(d, text)):
             return                       # repeat 垃圾：chatbox / 手腕屏 / 界面气泡全都不刷
         if text:
             self._text_deltas += 1

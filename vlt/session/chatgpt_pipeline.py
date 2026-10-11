@@ -11,6 +11,7 @@ import uuid
 
 from .base import TextDelta
 from .chatgpt_segments import Segmenter
+from .chatgpt_output import scope
 from ..ui_text import SOURCE_LANGS, TARGET_LANGS
 
 _STAGE_TIMEOUT = 35
@@ -108,7 +109,8 @@ class Coordinator:
         self._input_context = self._context()
 
     def _context(self):
-        return self._account_generation(), {k: _policy(cfg) for k, cfg in self._configs.items()}
+        return self._account_generation(), {k: (_policy(cfg), getattr(cfg, '_policy_revision', 0),
+            getattr(cfg.hotwords, '_revision', 0)) for k, cfg in self._configs.items()}
 
     def _sync_context(self):
         context = self._context()
@@ -255,9 +257,23 @@ class Coordinator:
             text = convert(text) if section.policy[1] == 'zh' else text
         if not self._valid(section):
             return False
-        on_text(TextDelta(confirmed=text, source=source, is_final=True))
-        if approval.pcm and self._valid(section):
-            on_audio(approval.pcm)
+        revoked = False
+        def still_approved(expected_direction=None):
+            nonlocal revoked
+            if expected_direction is not None and expected_direction != section.direction:
+                revoked = True
+                self._reason(direction, section.segment_id, 'direction-mismatch')
+                return False
+            if not revoked and self._valid(approval.section) and approval.verifier_version == _VERIFIER_VERSION:
+                return True
+            revoked = True
+            self._reason(direction, section.segment_id, 'stale-result')
+            return False
+
+        with scope(still_approved):
+            on_text(TextDelta(confirmed=text, source=source, is_final=True))
+            if approval.pcm and self._valid(section):
+                on_audio(approval.pcm)
         return True
 
     def _reason(self, direction, segment_id, reason):

@@ -15,6 +15,7 @@ from . import crashlog, endpoints, gui_chatgpt, i18n, update_check
 from .config import DEFAULT_CONFIG, load_config
 from .config_io import _fmt_scalar, _yaml_set_in_text, _yaml_set_or_create, _write_config_text
 from .i18n import t
+from .session.chatgpt_output import current
 from .paths import APP_DIR
 # ── 重导出（保持 from vlt.gui import X 向后兼容）──
 from . import ui_tk
@@ -242,7 +243,7 @@ class TranslationGUI(ProxyMethods):
     def _on_room_message(self, msg) -> None: gui_room.on_room_message(msg, self._room_cfg, self._q)
     def _on_room_status(self, text: str) -> None: gui_room.on_room_status(text, self._q)
     def _on_engine_text(self, who, source_id, src_text, tgt_text, is_final) -> None:
-        self._q.put(("text", who, src_text, tgt_text, is_final)); self._publish_to_room(source_id, src_text, is_final)
+        self._q.put(("text", who, src_text, tgt_text, is_final, current())); self._publish_to_room(source_id, src_text, is_final)
     def _publish_to_room(self, source_id, src_text, is_final) -> None:
         gui_room.publish_to_room(self._room, self._room_cfg, self._publisher, source_id, src_text, is_final)
     # ── 手腕屏微调 ──
