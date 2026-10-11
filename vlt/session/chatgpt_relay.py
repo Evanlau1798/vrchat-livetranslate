@@ -47,6 +47,10 @@ class SubscriptionRelay:
     async def audio_asr(self, pcm, language):
         return await self._transcribe(pcm, language, 24000, 90, TARGET_LANGS.values())
 
+    async def synthesize(self, text, target):
+        from .chatgpt_voice import NativeVoice
+        return await NativeVoice(self).generate(text, target)
+
     async def translate(self, source, target, vocabulary):
         if (not isinstance(vocabulary, dict)
                 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in vocabulary.items())
@@ -137,9 +141,9 @@ class SubscriptionRelay:
             raise RuntimeError('asr-result') from None
 
     async def _request(self, operation, body, headers):
-        if operation not in ('transcribe', 'responses'):
+        if operation not in ('transcribe', 'responses', 'live'):
             raise RuntimeError('request-invalid')
-        prefix = 'asr' if operation == 'transcribe' else 'text'
+        prefix = {'transcribe': 'asr', 'responses': 'text', 'live': 'voice'}[operation]
         generation = self.owner.generation
         credentials = await self.owner.credentials()
         if credentials.generation != generation or generation != self.owner.generation:

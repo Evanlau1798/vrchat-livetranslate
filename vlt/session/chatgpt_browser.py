@@ -45,12 +45,13 @@ class BrowserBridge:
         self._send_failed = False
         self._close_task = None
         self._open_task = None
+        self._page = None
 
     async def _http(self, connection, request):
         if request.headers.get('Host') != self.origin.removeprefix('http://'):
             return connection.respond(403, 'Forbidden')
         if request.path == '/' + self.token:
-            response = connection.respond(200, PAGE)
+            response = connection.respond(200, PAGE if self._page is None else self._page)
             response.headers['Content-Type'] = 'text/html; charset=utf-8'
             response.headers['Cache-Control'] = 'no-store'
             response.headers['Content-Security-Policy'] = "default-src 'none'; script-src 'unsafe-inline' blob:; worker-src blob:; connect-src 'self'; media-src blob:"

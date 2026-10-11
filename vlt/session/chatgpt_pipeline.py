@@ -15,6 +15,7 @@ from .chatgpt_output import scope
 from ..ui_text import SOURCE_LANGS, TARGET_LANGS
 
 _STAGE_TIMEOUT = 35
+_VOICE_TIMEOUT = 120
 _VERIFIER_VERSION = 'subscription-segment-v1'
 
 
@@ -167,9 +168,10 @@ class Coordinator:
     async def _stage(self, section, name, operation, *args):
         if not self._valid(section):
             raise _Rejected('stale-result')
-        deadline = asyncio.get_running_loop().time() + _STAGE_TIMEOUT
+        timeout = _VOICE_TIMEOUT if name == 'voice' else _STAGE_TIMEOUT
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
-            async with asyncio.timeout(_STAGE_TIMEOUT) as timer:
+            async with asyncio.timeout(timeout) as timer:
                 result = await operation(*args)
         except asyncio.TimeoutError:
             raise _Rejected(name + '-timeout') from None
