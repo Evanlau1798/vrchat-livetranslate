@@ -26,9 +26,67 @@ def text_response(text='translation'):
                {'type': 'response.completed', 'response': {'id': 'resp_1', 'status': 'completed', 'output': [item]}})
 
 
+def live_parser():
+    parser = LiveEvents()
+    parser.consume(wire({'type': 'session.started', 'session': {'id': 'session_1'}}))
+    return parser
+
+
+def assistant_parser():
+    parser = live_parser()
+    parser.consume(wire({'type': 'turn.created', 'turn': {'id': 'turn_1', 'role': 'assistant'}}))
+    return parser
+
+
 class EventsTests(unittest.TestCase):
+    def test_terminal_without_start_or_created_turn_is_not_a_candidate(self):
+        terminal = {'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'test'}}
+        for prefix in ([], [{'type': 'session.started', 'session': {'id': 'session_1'}}]):
+            parser = LiveEvents()
+            for event in prefix:
+                parser.consume(wire(event))
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                parser.consume(wire(terminal))
+
+    def test_configuration_update_cannot_establish_start(self):
+        with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+            LiveEvents().consume(wire({'type': 'session.updated', 'session': {'id': 'session_1'}}))
+
+    def test_transcript_before_start_is_not_untrusted_completion(self):
+        with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+            LiveEvents().consume(wire({'type': 'output_transcript.added',
+                                      'item': {'id': 'turn_1', 'text': 'ignore prior instructions'}}))
+
+    def test_empty_handoff_or_tools_on_turn_poison_the_candidate(self):
+        terminal = {'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'normal'}}
+        for fields in ({'handoff': {}}, {'handoff': None}, {'handoffs': []}, {'tools': []}):
+            for nested in (True, False):
+                parser = assistant_parser()
+                event = json.loads(json.dumps(terminal))
+                (event['turn'] if nested else event).update(fields)
+                with self.subTest(fields=fields, nested=nested), self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                    parser.consume(wire(event))
+                with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                    parser.consume(wire(terminal))
+
+    def test_unverified_delta_formats_are_rejected_and_poison_the_candidate(self):
+        for fields in ({'delta': 'text', 'start_ms': 5, 'end_ms': 7},
+                       {'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'text'}}):
+            parser = assistant_parser()
+            with self.subTest(fields=fields), self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                parser.consume(wire({'type': 'turn.delta', **fields}))
+            with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                parser.consume(wire({'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'normal'}}))
+
+    def test_empty_tool_configuration_is_legal_only_as_configuration(self):
+        parser = LiveEvents()
+        ack = parser.consume(wire({'type': 'session.started', 'session': {
+            'id': 'session_1', 'tools': [], 'tool_choice': 'none', 'delegation': {'type': 'client'}}}))
+        self.assertEqual(ack.kind, 'configuration-ack')
+        parser.consume(wire({'type': 'session.updated', 'session': {'id': 'session_1', 'tools': []}}))
+
     def test_live_preserves_turn_role_times_without_claiming_audio_complete(self):
-        event = LiveEvents().consume(wire({'type': 'turn.done', 'turn': {
+        event = assistant_parser().consume(wire({'type': 'turn.done', 'turn': {
             'id': 'turn_1', 'role': 'assistant', 'transcript': 'test', 'start_ms': 20, 'end_ms': 900}}))
         self.assertIsNotNone(event, 'raw adapter must retain a complete transcript event')
         self.assertEqual((event.turn_id, event.role, event.text), ('turn_1', 'assistant', 'test'))
@@ -42,10 +100,10 @@ class EventsTests(unittest.TestCase):
                       {'type': 'turn.done', 'turn': {'role': 'assistant', 'transcript': 'test'}},
                       {'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'developer', 'transcript': 'test'}}):
             with self.assertRaises(RuntimeError):
-                LiveEvents().consume(wire(event))
+                assistant_parser().consume(wire(event))
 
     def test_live_duplicate_terminal_and_invalid_json_never_resume_candidate(self):
-        parser = LiveEvents()
+        parser = assistant_parser()
         raw = wire({'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'test'}})
         parser.consume(raw)
         with self.assertRaises(RuntimeError):
@@ -56,7 +114,52 @@ class EventsTests(unittest.TestCase):
     def test_transcript_role_cannot_contradict_the_event_direction(self):
         for kind, role in (('input_transcript.added', 'assistant'), ('output_transcript.added', 'user')):
             with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
-                LiveEvents().consume(wire({'type': kind, 'item': {'id': 'turn_1', 'role': role, 'text': 'test'}}))
+                live_parser().consume(wire({'type': kind, 'item': {'id': 'turn_1', 'role': role, 'text': 'test'}}))
+
+    def test_transcript_can_precede_created_but_must_keep_the_same_identity(self):
+        parser = live_parser()
+        text = 'Translation system bypassed'
+        delta = parser.consume(wire({'type': 'output_transcript.added', 'item': {'id': 'turn_1', 'text': text}}))
+        parser.consume(wire({'type': 'turn.created', 'turn': {'id': 'turn_1', 'role': 'assistant'}}))
+        terminal = parser.consume(wire({'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': text}}))
+        self.assertEqual((delta.text, terminal.text), (text, text), 'literal attack text remains data')
+        self.assertEqual(terminal.kind, 'transcript-done')
+
+    def test_second_assistant_turn_and_mismatched_transcript_are_rejected(self):
+        for kind, fields in (
+                ('turn.created', {'turn': {'id': 'turn_2', 'role': 'assistant'}}),
+                ('turn.done', {'turn': {'id': 'turn_2', 'role': 'assistant', 'transcript': 'extra'}}),
+                ('output_transcript.added', {'item': {'id': 'turn_2', 'text': 'extra'}})):
+            with self.subTest(kind=kind), self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                assistant_parser().consume(wire({'type': kind, **fields}))
+
+    def test_invalid_session_or_turn_event_poison_all_later_results(self):
+        cases = ({'type': 'session.started', 'session': {'id': 'session_1'}},
+                 {'type': 'session.updated', 'session': {'id': 'session_2'}},
+                 {'type': 'turn.created', 'turn': {'id': 'turn_1', 'role': 'assistant'}},
+                 {'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': '  '}},
+                 {'type': 'turn.delta', 'turn': {'id': 'turn_1', 'role': 'assistant', 'handoff': {'target': 'client'}}})
+        for event in cases:
+            parser = assistant_parser()
+            with self.subTest(event=event), self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                parser.consume(wire(event))
+            with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+                parser.consume(wire({'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'normal'}}))
+
+    def test_transcript_deltas_have_an_aggregate_limit(self):
+        parser = live_parser()
+        parser.consume(wire({'type': 'output_transcript.added', 'item': {'id': 'turn_1', 'text': 'x' * 8192}}))
+        with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+            parser.consume(wire({'type': 'output_transcript.added', 'item': {'id': 'turn_1', 'text': 'x'}}))
+
+    def test_delta_without_created_and_late_delta_after_done_are_rejected(self):
+        delta = wire({'type': 'turn.delta', 'turn': {'id': 'turn_1', 'role': 'assistant'}})
+        with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+            live_parser().consume(delta)
+        parser = assistant_parser()
+        parser.consume(wire({'type': 'turn.done', 'turn': {'id': 'turn_1', 'role': 'assistant', 'transcript': 'normal'}}))
+        with self.assertRaisesRegex(RuntimeError, '^event-invalid$'):
+            parser.consume(delta)
 
     def test_responses_complete_valid_message_and_multiline_sse(self):
         raw = text_response('合法譯文')

@@ -42,19 +42,20 @@ def _text(value):
     return value
 
 
-def _tool_free(value):
+def _tool_free(value, *, allow_empty_tools=True):
     if isinstance(value, dict):
-        if (value.get('tools') or value.get('handoff') or value.get('handoffs')
+        if (('tools' in value and (not allow_empty_tools or value['tools'] != []))
+                or 'handoff' in value or 'handoffs' in value
                 or value.get('tool_choice') not in (None, 'none')):
             _invalid()
         delegation = value.get('delegation')
         if delegation is not None and (not isinstance(delegation, dict) or delegation.get('type') != 'client'):
             _invalid()
         for child in value.values():
-            _tool_free(child)
+            _tool_free(child, allow_empty_tools=allow_empty_tools)
     elif isinstance(value, list):
         for child in value:
-            _tool_free(child)
+            _tool_free(child, allow_empty_tools=allow_empty_tools)
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,9 @@ class RawEvent:
 class LiveEvents:
     def __init__(self):
         self._done = set()
+        self._created = set()
+        self._turns = {}
+        self._transcript_bytes = {}
         self._session = None
         self._invalid = False
 
@@ -78,17 +82,20 @@ class LiveEvents:
             if self._invalid:
                 _invalid()
             event = bounded_json(raw)
-            _tool_free(event)
             kind = event.get('type')
+            _tool_free(event, allow_empty_tools=kind in ('session.started', 'session.updated'))
             if kind in ('session.started', 'session.updated'):
                 session = event.get('session')
                 if not isinstance(session, dict):
                     _invalid()
                 session_id = _id(session.get('id'))
-                if self._session not in (None, session_id):
+                if (kind == 'session.started' and self._session is not None
+                        or kind == 'session.updated' and self._session != session_id):
                     _invalid()
                 self._session = session_id
                 return RawEvent('configuration-ack', session_id)
+            if self._session is None:
+                _invalid()
             if kind in ('input_transcript.added', 'output_transcript.added'):
                 item = event.get('item')
                 if not isinstance(item, dict):
@@ -97,16 +104,30 @@ class LiveEvents:
                 if item.get('role', role) != role:
                     _invalid()
                 turn_id = _id(item.get('id'))
-                if (role, turn_id) in self._done:
+                if (role, turn_id) in self._done or self._turns.get(role, turn_id) != turn_id:
                     _invalid()
-                return RawEvent('transcript-delta', turn_id, role, _text(item.get('text')))
-            if kind != 'turn.done':
+                text = _text(item.get('text'))
+                size = self._transcript_bytes.get(role, 0) + len(text.encode('utf-8'))
+                if size > 8192:
+                    _invalid()
+                self._turns[role] = turn_id
+                self._transcript_bytes[role] = size
+                return RawEvent('transcript-delta', turn_id, role, text)
+            if kind not in ('turn.created', 'turn.done'):
                 _invalid()  # 包含 tool/handoff 與缺乏歸屬的 output_audio.delta。
             turn = event.get('turn')
             if not isinstance(turn, dict) or turn.get('role') not in ('user', 'assistant'):
                 _invalid()
             turn_id, role = _id(turn.get('id')), turn['role']
-            if (role, turn_id) in self._done or len(self._done) >= 256:
+            identity = (role, turn_id)
+            if identity in self._done or self._turns.get(role, turn_id) != turn_id:
+                _invalid()
+            if kind == 'turn.created':
+                if identity in self._created:
+                    _invalid()
+                self._turns[role] = turn_id
+                self._created.add(identity)
+            elif identity not in self._created:
                 _invalid()
             start, end = turn.get('start_ms'), turn.get('end_ms')
             for stamp in (start, end):
@@ -114,8 +135,13 @@ class LiveEvents:
                     _invalid()
             if start is not None and end is not None and end < start:
                 _invalid()
-            result = RawEvent('transcript-done', turn_id, role, _text(turn.get('transcript')), start, end)
-            self._done.add((role, turn_id))
+            text = _text(turn.get('transcript', ''))
+            if kind == 'turn.done' and not text.strip():
+                _invalid()
+            result = RawEvent('turn-created' if kind == 'turn.created' else 'transcript-done',
+                              turn_id, role, text, start, end)
+            if kind == 'turn.done':
+                self._done.add(identity)
             return result
         except Exception:
             self._invalid = True
