@@ -3,6 +3,7 @@ import asyncio
 
 from . import chatgpt_auth, chatgpt_relay
 from .base import LiveTranslateSession
+from .chatgpt_http import tls_context
 from .chatgpt_pipeline import Coordinator
 
 
@@ -26,24 +27,34 @@ class ChatGPTValidatedSession(LiveTranslateSession):
             raise RuntimeError('session-input')
         self._started = True
         self.on_text, self.on_audio, self.on_usage = on_text, on_audio, on_usage
+        failure = 'session-start'
         try:
             async with asyncio.timeout(35):
-                await self._owner.credentials()
+                credentials = await self._owner.credentials()
             if self._closing:
                 raise RuntimeError('session-closed')
             self._owner.require_usable()
+            # Load native CAs before Engine starts input processing, not during an utterance.
+            tls_context()
+            await asyncio.sleep(0)
+            if self._closing or credentials.generation != self._owner.generation:
+                raise RuntimeError('session-closed')
+            self._owner.require_usable()
             admission = getattr(self, '_engine_admission', None)
+            if admission is not None and not admission.valid():
+                failure = 'session-context'
+                raise RuntimeError('session-context')
             self._pipeline = Coordinator({self._direction: self.cfg},
                 chatgpt_relay.SubscriptionRelay(self._owner), self._reason,
                 lambda: self._owner.generation,
                 lambda _: admission is None or admission.valid())
             self._alive = True
         except BaseException as error:
-            self._failure = 'session-start'
+            self._failure = failure
             await self.close()
             if isinstance(error, asyncio.CancelledError) or not isinstance(error, Exception):
                 raise
-            raise RuntimeError('session-start') from None
+            raise RuntimeError(failure) from None
 
     def _usable(self):
         if not self.is_alive:

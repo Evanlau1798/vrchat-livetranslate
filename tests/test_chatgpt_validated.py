@@ -29,7 +29,9 @@ class ValidatedTests(unittest.IsolatedAsyncioTestCase):
             validate_audio=AsyncMock(side_effect=lambda *_: dict(self.verdict)))
         self.owner = SimpleNamespace(generation=1, require_usable=lambda: None,
                                      credentials=AsyncMock(return_value=SimpleNamespace(generation=1)))
+        self.owner.credentials.side_effect = lambda: SimpleNamespace(generation=self.owner.generation)
         for name, value in [('vlt.session.chatgpt_auth.AUTH_OWNER', self.owner),
+                            ('vlt.session.chatgpt_validated.tls_context', Mock()),
                             ('vlt.session.chatgpt_relay.SubscriptionRelay', Mock(return_value=self.services)),
                             ('vlt.session.chatgpt_live.CodexRPC', Mock(side_effect=AssertionError('inference executor constructed'))),
                             ('asyncio.create_subprocess_exec', AsyncMock(side_effect=AssertionError('process launched'))),
