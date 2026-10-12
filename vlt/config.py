@@ -13,7 +13,7 @@ import yaml
 
 from . import endpoints
 from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
-                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_USER_QUIET_S)
+                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_USER_QUIET_S, _PolicyWords)
 
 from .paths import APP_DIR, BUNDLE_DIR
 
@@ -118,6 +118,26 @@ def merge_hotwords(glossary: dict[str, str] | None,
     return {**(glossary or {}), **(hotwords or {})}
 
 
+class _SessionBase(_PolicyWords):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._wrap_glossary()
+
+    def _wrap_glossary(self):
+        words = self.get('glossary')
+        if isinstance(words, dict) and not isinstance(words, _PolicyWords):
+            dict.__setitem__(self, 'glossary', _PolicyWords(words))
+
+    def _mutate(self, operation, *args, **kwargs):
+        before = self.get('glossary')
+        try:
+            return super()._mutate(operation, *args, **kwargs)
+        finally:
+            self._wrap_glossary()
+            if self.get('glossary') is not before:
+                self._revision += 1
+
+
 @dataclass
 class Direction:
     source_lang: str | None = None
@@ -126,8 +146,17 @@ class Direction:
     hotwords: dict[str, str] = field(default_factory=dict)
     voice: str | None = None
 
+    def __setattr__(self, name, value):
+        data = self.__dict__
+        if name == 'hotwords' and isinstance(value, dict) and not isinstance(value, _PolicyWords):
+            value = _PolicyWords(value)
+        if name in ('source_lang', 'target_lang', 'output_audio', 'hotwords', 'voice') and name in data:
+            if data[name] != value or (name == 'hotwords' and data[name] is not value):
+                data['_policy_revision'] = data.get('_policy_revision', 0) + 1
+        object.__setattr__(self, name, value)
+
     def to_session_config(self, base: dict[str, Any]) -> SessionConfig:
-        return SessionConfig(
+        cfg = SessionConfig(
             model=base["model"],
             target_lang=self.target_lang,
             source_lang=self.source_lang,
@@ -152,6 +181,8 @@ class Direction:
                 base.get("fast_final_user_quiet_s", DEFAULT_FAST_FINAL_USER_QUIET_S),
                 DEFAULT_FAST_FINAL_USER_QUIET_S, key="session.fast_final_user_quiet_s"),
         )
+        cfg._direction_policy_revision = getattr(self, '_policy_revision', 0)
+        return cfg
 
 
 @dataclass
@@ -171,6 +202,16 @@ class AppConfig:
     # 桌面字幕（PC 桌面模式：贴 VRChat 窗口的叠加窗）。与 `overlay`（头显手腕屏）是两条腿，
     # 视觉参数从 `overlay` 段继承，见 vlt/output/desktop_overlay.py 的 from_dict。
     desktop_overlay: dict[str, Any] = field(default_factory=dict)
+
+    def __setattr__(self, name, value):
+        data = self.__dict__
+        if name in ('session_base', 'directions') and isinstance(value, dict):
+            policy_type = _SessionBase if name == 'session_base' else _PolicyWords
+            if not isinstance(value, policy_type):
+                value = policy_type(value)
+            if name in data and data[name] is not value:
+                data['_policy_revision'] = data.get('_policy_revision', 0) + 1
+        object.__setattr__(self, name, value)
 
     def direction(self, name: str) -> Direction:
         if name not in self.directions:

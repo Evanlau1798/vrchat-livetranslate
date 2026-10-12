@@ -16,7 +16,6 @@ from vlt.session.base import SessionConfig, create_session
 from vlt import gui_engine, ui_state
 from vlt.engine import Engine, EngineEvents
 from vlt import crashlog
-from vlt.session.chatgpt_live import ChatGPTLiveSession
 
 
 class IntegrationTests(unittest.TestCase):
@@ -26,22 +25,32 @@ class IntegrationTests(unittest.TestCase):
             path.write_text('session:\n  provider: chatgpt\n', encoding='utf-8')
             cfg = load_config(path)
         engine = Engine(cfg, 'mine', 'mic', set(), EngineEvents())
-        session = ChatGPTLiveSession(SessionConfig(provider='chatgpt'))
+        scfg = cfg.direction('mine').to_session_config(cfg.session_base)
+        scfg._direction = 'mine'
+        session = create_session(scfg)
+        self.assertEqual(type(session).__name__, 'ChatGPTValidatedSession')
         engine._session = session
         engine._dump_diagnostics = Mock()
         from unittest.mock import AsyncMock
+        owner = SimpleNamespace(generation=1, require_usable=lambda: None,
+                                credentials=AsyncMock(return_value=SimpleNamespace(generation=1)))
+        session._owner = owner
         engine._reconnect_loop = AsyncMock()
         async def check():
-            session._alive = True
-            await engine._watchdog()
-            self.assertIsNone(engine._reconnect_task)
-            session._fail('bridge failed')
-            await engine._watchdog()
-            self.assertIsNotNone(engine._reconnect_task, 'dead ChatGPT session never reconnects')
-            await engine._reconnect_task
+            with patch('vlt.session.chatgpt_relay.SubscriptionRelay', return_value=SimpleNamespace()):
+                await session.start(Mock())
+                try:
+                    await engine._watchdog()
+                    self.assertIsNone(engine._reconnect_task)
+                    session.abort('session-context')
+                    await engine._watchdog()
+                    self.assertIsNotNone(engine._reconnect_task, 'dead ChatGPT session never reconnects')
+                    await engine._reconnect_task
+                finally:
+                    await session.close()
         asyncio.run(check())
-        engine._dump_diagnostics.assert_called_once_with('bridge failed')
-        engine._reconnect_loop.assert_awaited_once_with('bridge failed')
+        engine._dump_diagnostics.assert_called_once_with('session-context')
+        engine._reconnect_loop.assert_awaited_once_with('session-context', engine._session)
 
     def test_engine_subscription_never_derives_or_calls_qwen_http(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -89,11 +98,11 @@ class IntegrationTests(unittest.TestCase):
             key_loader.assert_not_called()
             scfg = cfg.direction('mine').to_session_config(cfg.session_base)
             self.assertEqual(scfg.target_lang, 'ja')
-            self.assertEqual(type(create_session(scfg)).__name__, 'ChatGPTLiveSession')
+            self.assertEqual(type(create_session(scfg)).__name__, 'ChatGPTValidatedSession')
 
     def test_factory_uses_subscription_provider(self):
         cfg = SessionConfig(provider='chatgpt', target_lang='ja')
-        self.assertEqual(type(create_session(cfg)).__name__, 'ChatGPTLiveSession')
+        self.assertEqual(type(create_session(cfg)).__name__, 'ChatGPTValidatedSession')
 
     def test_refresh_clears_api_key_without_reading_credentials(self):
         cfg = SimpleNamespace(session_base={'provider': 'chatgpt', 'api_key': 'qwen-secret'})

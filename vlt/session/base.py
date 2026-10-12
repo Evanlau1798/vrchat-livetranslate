@@ -158,7 +158,7 @@ class SessionConfig:
         if (name == 'hotwords' and data.get('provider') == 'chatgpt'
                 and isinstance(value, dict) and not isinstance(value, _PolicyWords)):
             value = _PolicyWords(value)
-        if (name in ('provider', 'source_lang', 'target_lang', 'output_audio', 'hotwords')
+        if (name in ('provider', 'source_lang', 'target_lang', 'output_audio', 'hotwords', '_direction')
                 and name in data and (data[name] != value or (name == 'hotwords' and data[name] is not value))):
             data['_policy_revision'] = data.get('_policy_revision', 0) + 1
         object.__setattr__(self, name, value)
@@ -228,8 +228,8 @@ class LiveTranslateSession(abc.ABC):
 def create_session(cfg: SessionConfig) -> LiveTranslateSession:
     """按模型名前缀分发到对应代次的实现（可插拔点）。"""
     if cfg.provider == endpoints.PROVIDER_CHATGPT:
-        from .chatgpt_live import ChatGPTLiveSession
-        return ChatGPTLiveSession(cfg)
+        from .chatgpt_validated import ChatGPTValidatedSession
+        return ChatGPTValidatedSession(cfg)
     model = cfg.model.lower()
     if model.startswith("qwen3.8-livetranslate") or model.startswith("qwen3.5-livetranslate"):
         from .qwen38 import QwenLiveTranslateSession  # 3.5/3.8 共用一套写出逻辑，差异在事件映射

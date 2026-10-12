@@ -91,7 +91,7 @@ class Coordinator:
                 accepted += int(self.submit(direction, section.pcm))
         return accepted
 
-    def __init__(self, configs, services, on_reason, account_generation):
+    def __init__(self, configs, services, on_reason, account_generation, context_valid=None):
         if not configs or any(k not in ('mine', 'theirs') for k in configs):
             raise ValueError('direction-invalid')
         if any(cfg.provider != 'chatgpt' for cfg in configs.values()):
@@ -100,6 +100,7 @@ class Coordinator:
         self._services = services
         self._on_reason = on_reason
         self._account_generation = account_generation
+        self._context_valid = context_valid
         self._epoch = 0
         self._closed = False
         self._pending = {k: deque() for k in configs}
@@ -158,6 +159,7 @@ class Coordinator:
     def _valid(self, section):
         try:
             return (not self._closed and section.epoch == self._epoch
+                    and (self._context_valid is None or self._context_valid(section.direction))
                     and self._context() == self._input_context
                     and section.account_generation == self._account_generation()
                     and section.policy == _policy(self._configs[section.direction])

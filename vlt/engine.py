@@ -29,6 +29,8 @@ from .output.overlay import OverlayConfig
 from .output.virtualmic import VirtualMic, pick_output_device, resample_24k_mono_to_48k_stereo
 from .session.base import SessionConfig, TextDelta, create_session
 from .session.chatgpt_output import allowed as output_allowed, current as output_approval
+from .session.chatgpt_admission import Admission
+from . import i18n
 from .textin import DEFAULT_MODEL as DEFAULT_TEXT_MODEL
 from .textin import DEFAULT_TIMEOUT_S as DEFAULT_TEXT_TIMEOUT_S
 from .textin import TextTranslateError, split_for_chatbox, terms_from_mapping, translate_text
@@ -477,6 +479,16 @@ class Engine:
     stop() 幂等，可重复调用，5 秒内必须返回。
     """
 
+    def __setattr__(self, name, value):
+        if name == '_direction' and name in self.__dict__ and self._direction != value:
+            self._revoke_output()
+        object.__setattr__(self, name, value)
+
+    def _revoke_output(self):
+        admission = getattr(self, '_admission', None)
+        if admission is not None:
+            admission.revoke()
+
     def __init__(
         self,
         cfg: AppConfig,
@@ -519,6 +531,9 @@ class Engine:
         self._stop_event = threading.Event()
 
         self._session = None
+        self._admission = None
+        self._session_start_task = None
+        self._started_session = None
         self._chatbox: Chatbox | None = None
         self._merger: Merger | None = None
         self._overlay: Any | None = None
@@ -603,6 +618,7 @@ class Engine:
         在前一个收尾期间继续采集/上送（用户真机日志：点停止后 loopback 腿又跑了 10s）。
         界面现在先对所有引擎 `request_stop()`（并发下发，采集立刻停），收尾交给后台线程。
         """
+        self._revoke_output()
         self._stopping = True
         self._stop_event.set()          # 直接置位（线程安全）：采集循环下个周期就退出
         if self._loop is not None and self._loop.is_running():
@@ -746,6 +762,7 @@ class Engine:
         d = self._cfg.directions.get(self._direction)
         if d is None:
             return False
+        self._revoke_output()
         d.source_lang = source_lang
         d.target_lang = target_lang
         if self._session is not None and self._loop is not None and self._loop.is_running():
@@ -770,6 +787,7 @@ class Engine:
         返回 False 表示**这次没能生效**（预算不足），调用方必须让用户看见，
         绝不能出现「界面上词库已保存、实际还是老词库」这种静默不一致。
         """
+        self._revoke_output()
         self._cfg.session_base["glossary"] = dict(glossary or {})
         return self._apply_hotwords_change("专有词库")
 
@@ -795,6 +813,7 @@ class Engine:
             print(f"[engine] ⚠️ 配置里没有方向 {name!r}，热词未生效（只改了磁盘，内存里没这个方向）",
                   flush=True)
             return False
+        self._revoke_output()
         d.hotwords = dict(hotwords or {})
         return self._apply_hotwords_change(f"「{label or name}」的热词")
 
@@ -829,6 +848,7 @@ class Engine:
         PCM 源则在每个 chunk 之间检查 _stopping。不能用 cancel() 硬砍主协程，
         那样 _cleanup() 里的 await 会被打断，音频流/会话关不干净。
         """
+        self._revoke_output()
         self._stopping = True
         self._stop_event.set()
 
@@ -988,7 +1008,23 @@ class Engine:
             max_chars=int(cb_cfg.get("max_chars", 144)),
         )
 
-        await self._create_session(scfg)
+        created = await self._create_session(scfg)
+        # 重建可接管连线，采集主协程仍等待实际建立者，不提前清理新会话。
+        while created is False and not self._stopping:
+            if self._session is not None and self._session is self._started_session:
+                break
+            starter = self._session_start_task
+            if starter is None or starter is asyncio.current_task():
+                raise RuntimeError('session-start')
+            try:
+                await self._wait_connection(starter)
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                pass
+        if self._stopping:
+            return
 
         self._pump_task = asyncio.create_task(self._pump_loop())
         await self._feed_audio()
@@ -1087,7 +1123,35 @@ class Engine:
             device_fallbacks=fallbacks,
         )
 
-    async def _create_session(self, scfg: SessionConfig) -> None:
+    async def _wait_connection(self, task, expected_session=...):
+        try:
+            while not task.done():
+                if (self._stopping or (expected_session is not ...
+                        and self._session is not expected_session)):
+                    return False
+                await asyncio.wait((task,), timeout=.1)
+            if (self._stopping or (expected_session is not ...
+                    and self._session is not expected_session)):
+                return False
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _create_session(self, scfg: SessionConfig) -> bool:
+        starter = self._session_start_task = asyncio.current_task()
+        try:
+            return await self._connect_session(scfg)
+        finally:
+            if self._session_start_task is starter:
+                self._session_start_task = None
+
+    async def _connect_session(self, scfg: SessionConfig) -> bool:
+        previous = self._session
+        self._revoke_output()
+        if self._stopping:
+            return False
         now = time.monotonic()
         rpm = int(self._cfg.session_base.get("max_new_sessions_per_minute", 4))
         recent = [t for t in self._connect_ts if now - t < 60]
@@ -1095,32 +1159,76 @@ class Engine:
             wait = 60.0 - (now - recent[0]) + 0.05
             self._events.on_status("warn",
                 f"连接预算已满（{len(recent)}/{rpm}/min），等待 {wait:.0f}s")
-            await asyncio.sleep(wait)
+            if await self._wait_connection(asyncio.create_task(asyncio.sleep(wait)), previous) is False:
+                return False
 
+        if self._stopping or self._session is not previous:
+            return False
+
+        if scfg.provider == endpoints.PROVIDER_CHATGPT:
+            scfg._direction = self._direction
+            scfg.output_audio = bool(scfg.output_audio and self._direction == 'mine' and self._virtualmic is not None)
         self._session = create_session(scfg)
+        session = self._session
+        self._started_session = None
+        self._admission = Admission(self, session) if scfg.provider == endpoints.PROVIDER_CHATGPT else None
+        if scfg.provider == endpoints.PROVIDER_CHATGPT:
+            session._engine_admission = self._admission
+            if not self._admission.valid():
+                await session.close()
+                if self._stopping or self._session is not session:
+                    return False
+                raise RuntimeError('session-context')
+            self._session.on_rejection = lambda reason: self._events.on_status('warn',
+                i18n.t('ChatGPT 本段未输出（{reason}）。下一段将继续翻译。', reason=reason))
         # 新会话 = 新的一页：repeat 抑制状态清零（上一段的重复历史不带过来）
         self._repeat_suppressed = False
         self._repeat_dropped = 0
         self._final_hist.clear()
         t0 = time.perf_counter()
-        await self._session.start(
-            on_text=self._on_text,
-            on_audio=self._on_audio,
-            on_usage=self._on_usage,
-        )
+        try:
+            # 启动子任务可取消；采集主协程保留清理责任，不被停止信号硬取消。
+            started = await self._wait_connection(asyncio.create_task(session.start(
+                on_text=self._admission.wrap(self._on_text) if self._admission else self._on_text,
+                on_audio=self._admission.wrap(self._on_audio) if self._admission else self._on_audio,
+                on_usage=self._on_usage,
+            )), session)
+            if started is False:
+                await session.close()
+                return False
+        except Exception:
+            await session.close()
+            if self._stopping or self._session is not session:
+                return False
+            raise
+        if (self._stopping or self._session is not session
+                or (self._admission is not None and not self._admission.valid())):
+            await session.close()
+            if not self._stopping and self._session is session:
+                raise RuntimeError('session-context')
+            return False
         self._connect_ts.append(time.monotonic())
         self._session_started_at = time.monotonic()
+        self._started_session = session
         ms = (time.perf_counter() - t0) * 1000
         self._events.on_status("info", f"会话已建立（{ms:.0f}ms）")
         self._events.on_stats({"connect_ms": round(ms, 1)})
+        return True
 
     async def _rebuild_session(self) -> None:
+        self._revoke_output()
+        old_session = self._session
         try:
-            if self._session is not None:
-                await self._session.close()
-                self._session = None
+            if old_session is not None:
+                await old_session.close()
+            if self._stopping or self._session is not old_session:
+                return
+            self._session = None
             scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-            await self._create_session(scfg)
+            if await self._create_session(scfg) is False:
+                return
+            if self._stopping:
+                return
             d = self._cfg.directions[self._direction]
             self._events.on_status("info",
                 f"语言已切换：{d.source_lang or '自动'}→{d.target_lang}")
@@ -1205,6 +1313,10 @@ class Engine:
     def _on_text(self, d: TextDelta) -> None:
         text = d.display
         approval = output_approval()
+        subscription = (self._cfg.session_base.get('provider') == endpoints.PROVIDER_CHATGPT or
+                        getattr(getattr(self._session, 'cfg', None), 'provider', None) == endpoints.PROVIDER_CHATGPT)
+        if subscription and (self._admission is None or not self._admission.accepts(approval)):
+            return
         if not output_allowed(approval, self._direction) or (approval is None and self._swallow_repeat(d, text)):
             return                       # repeat 垃圾：chatbox / 手腕屏 / 界面气泡全都不刷
         if text:
@@ -1214,9 +1326,9 @@ class Engine:
         if d.is_final:
             # 一句译音出完了 → 下一段音频起始处给它封句尾（虚拟麦整句丢弃的依据）
             self._pending_seal = True
-        if self._overlay is not None:
+        if self._overlay is not None and output_allowed(approval, self._direction):
             self._overlay.update(text, d.source or "")
-        if self._merger is not None and self._chatbox_wanted:
+        if self._merger is not None and self._chatbox_wanted and output_allowed(approval, self._direction):
             # 只换「往 chatbox 送什么」这一步：节流 / 去重 / 句末必刷全部复用同一个
             # Merger（构造一个载荷 TextDelta 给它，Merger 自身一行不改）。
             payload = self.chatbox_payload(d)
@@ -1286,13 +1398,21 @@ class Engine:
         # 会话实现没有主动放弃接口（测试替身 / 未来别的实现）→ 直接走重连调度，
         # 效果与看门狗路径一致（带退避 + RPM 预算，不会更凶）。
         if s is not None and (self._reconnect_task is None or self._reconnect_task.done()):
-            self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
+            self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason, s))
 
     def _on_audio(self, pcm: bytes) -> None:
+        subscription = (self._cfg.session_base.get('provider') == endpoints.PROVIDER_CHATGPT or
+                        getattr(getattr(self._session, 'cfg', None), 'provider', None) == endpoints.PROVIDER_CHATGPT)
+        if subscription and (
+                self._direction != 'mine' or self._admission is None
+                or not self._admission.accepts(output_approval())):
+            return
         if self._virtualmic is None or not output_allowed(output_approval(), self._direction):
             return
         self._audio_chunks += 1
         stereo = resample_24k_mono_to_48k_stereo(pcm)
+        if not output_allowed(output_approval(), self._direction):
+            return
         # 句子边界（两条触发，缺一不可）：
         # ① 上一句的终版文本已到 → 现在这段音频属于新的一句；
         # ② 音频流静默 ≥ SENTENCE_GAP_S（终版文本没来时兜底）。
@@ -1304,7 +1424,8 @@ class Engine:
             self._virtualmic.end_sentence()
         self._pending_seal = False
         self._last_audio_ts = now
-        self._virtualmic.push(stereo)
+        if output_allowed(output_approval(), self._direction):
+            self._virtualmic.push(stereo)
 
     def _on_usage(self, u: dict) -> None:
         self._events.on_stats({k: v for k, v in u.items() if isinstance(v, int)})
@@ -1460,15 +1581,19 @@ class Engine:
         那条腿直接「运行错误」结束，只能重开界面。现在改为自动重连（带退避，
         并复用 `_create_session` 里的 RPM 预算等待）。
         """
-        if self._stopping or self._session is None:
+        session = self._session
+        if self._stopping or session is None:
             return
-        if getattr(self._session, "is_alive", True):
+        if self._session_start_task is not None and not self._session_start_task.done():
+            return
+        if getattr(session, "is_alive", True):
             return
         if self._reconnect_task is not None and not self._reconnect_task.done():
             return                                  # 已有重连在跑
-        reason = getattr(self._session, "fail_reason", "") or "连接已断开"
+        reason = getattr(session, "fail_reason", "") or "连接已断开"
+        self._revoke_output()
         self._dump_diagnostics(reason)             # 断线先留证据，再重连
-        self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason))
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop(reason, session))
 
     def _dump_diagnostics(self, reason: str) -> None:
         """断线时把「黑匣子」打出来 —— 用来定位服务端为什么掐断连接。
@@ -1526,18 +1651,23 @@ class Engine:
         lines.append("─" * 64)
         print("\n".join(lines), flush=True)
 
-    async def _reconnect_session(self) -> None:
+    async def _reconnect_session(self) -> bool:
         """关掉旧会话再建一个（失败会抛，交给重试循环）。"""
+        self._revoke_output()
+        old_session = self._session
         try:
-            if self._session is not None:
-                await self._session.close()
+            if old_session is not None:
+                await old_session.close()
         except Exception:  # noqa: BLE001
             pass
+        if self._stopping or self._session is not old_session:
+            return False
         self._session = None
         scfg = self._cfg.directions[self._direction].to_session_config(self._cfg.session_base)
-        await self._create_session(scfg)
+        return await self._create_session(scfg)
 
-    async def _reconnect_loop(self, reason: str) -> None:
+    async def _reconnect_loop(self, reason: str, expected_session=None) -> None:
+        expected_session = self._session if expected_session is None else expected_session
         backoff = [float(x) for x in self._cfg.session_base.get("reconnect_backoff", [2, 5, 10, 30])]
         attempt = 0
         while not self._stopping:
@@ -1547,16 +1677,20 @@ class Engine:
             self._events.on_status("warn", msg)
             print(f"[session] ⚠️ {msg}", flush=True)
             await asyncio.sleep(wait)
-            if self._stopping:
+            if self._stopping or self._session is not expected_session:
                 return
             try:
-                await self._reconnect_session()
+                if await self._reconnect_session() is False:
+                    return
+                if self._stopping:
+                    return
                 print(f"[session] ✅ 已重连（第 {attempt} 次）", flush=True)
                 self._events.on_status("info", f"已重连（第 {attempt} 次）")
                 return
             except Exception as exc:  # noqa: BLE001
                 print(f"[session] ❌ 第 {attempt} 次重连失败：{type(exc).__name__}: {exc}",
                       flush=True)
+                expected_session = self._session
 
 
 # ================================================================ 音频采集函数

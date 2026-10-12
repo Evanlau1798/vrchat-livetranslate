@@ -1,6 +1,7 @@
 """訂閱語音詞條，沿用 i18n.t；獨立存放避免既有詞表超過單檔上限。"""
 STRINGS = {
     'en': {
+        'ChatGPT 本段未输出（{reason}）。下一段将继续翻译。': 'ChatGPT did not output this segment ({reason}). Translation will continue with the next segment.',
         'ChatGPT 订阅语音（消耗 Codex 额度）': 'ChatGPT subscription voice (uses Codex quota)',
         '登录 ChatGPT ▸': 'Log in to ChatGPT ▸',
         'ChatGPT 订阅语音使用此工具专属登录，不影响本机 Codex。\n请先登录 ChatGPT，再选择中文 → 日本语与「我说」。': 'This tool has its own ChatGPT login and does not change your local Codex login.\nLog in, then choose Chinese → Japanese and “My speech”.',
@@ -14,6 +15,7 @@ STRINGS = {
         '无法启动登录，请确认已安装官方 Codex CLI。': 'Unable to start login. Make sure the official Codex CLI is installed.',
     },
     'ja': {
+        'ChatGPT 本段未输出（{reason}）。下一段将继续翻译。': 'ChatGPT はこの区間を出力しませんでした（{reason}）。次の区間の翻訳を続けます。',
         'ChatGPT 订阅语音（消耗 Codex 额度）': 'ChatGPT サブスクリプション音声（Codex の利用枠を消費）',
         '登录 ChatGPT ▸': 'ChatGPT にログイン ▸',
         'ChatGPT 订阅语音使用此工具专属登录，不影响本机 Codex。\n请先登录 ChatGPT，再选择中文 → 日本语与「我说」。': 'このツール専用の ChatGPT ログインを使用し、ローカルの Codex には影響しません。\nログイン後、中国語 → 日本語と「自分の発言」を選択してください。',
@@ -27,6 +29,7 @@ STRINGS = {
         '无法启动登录，请确认已安装官方 Codex CLI。': 'ログインを開始できません。公式 Codex CLI がインストールされているか確認してください。',
     },
     'ko': {
+        'ChatGPT 本段未输出（{reason}）。下一段将继续翻译。': 'ChatGPT가 이 구간을 출력하지 않았습니다({reason}). 다음 구간의 번역은 계속됩니다.',
         'ChatGPT 订阅语音（消耗 Codex 额度）': 'ChatGPT 구독 음성 (Codex 사용 한도 소모)',
         '登录 ChatGPT ▸': 'ChatGPT 로그인 ▸',
         'ChatGPT 订阅语音使用此工具专属登录，不影响本机 Codex。\n请先登录 ChatGPT，再选择中文 → 日本语与「我说」。': '이 도구 전용 ChatGPT 로그인을 사용하며 로컬 Codex 로그인에는 영향을 주지 않습니다.\n로그인 후 중국어 → 일본어와 “내 발언”을 선택하세요.',
@@ -40,6 +43,7 @@ STRINGS = {
         '无法启动登录，请确认已安装官方 Codex CLI。': '로그인을 시작할 수 없습니다. 공식 Codex CLI가 설치되어 있는지 확인하세요.',
     },
     'ru': {
+        'ChatGPT 本段未输出（{reason}）。下一段将继续翻译。': 'ChatGPT не вывел этот фрагмент ({reason}). Перевод продолжится со следующего фрагмента.',
         'ChatGPT 订阅语音（消耗 Codex 额度）': 'Голос по подписке ChatGPT (расходует квоту Codex)',
         '登录 ChatGPT ▸': 'Войти в ChatGPT ▸',
         'ChatGPT 订阅语音使用此工具专属登录，不影响本机 Codex。\n请先登录 ChatGPT，再选择中文 → 日本语与「我说」。': 'У этого инструмента отдельный вход в ChatGPT, который не меняет вход в локальный Codex.\nВойдите, затем выберите китайский → японский и «Моя речь».',
