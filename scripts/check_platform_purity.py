@@ -67,8 +67,18 @@ FORBIDDEN: dict[str, dict[str, list[str]]] = {
         "modules": [
             "vlt.platform.linux",          # PipeWire 设备枚举/采集/虚拟声卡（pw-dump/record/cat）
             "vlt.platform.wayland",        # 原生 layer-shell 桌面叠加窗（libwayland-client）
+            "vlt.platform.wayland_protocol",
+            "vlt.platform.wayland_surface",
+            "vlt.platform.wayland_events",
             "vlt.platform.x11",            # 原生 ARGB 桌面叠加窗（libX11）
+            "vlt.platform.x11_bindings",
             "vlt.output.openxr_overlay",   # 自建 OpenXR 手腕屏（pyopenxr + EGL/Wayland）
+            "vlt.output.openxr_actions",
+            "vlt.output.openxr_demo",
+            "vlt.output.openxr_gl",
+            "vlt.output.openxr_maintenance",
+            "vlt.output.openxr_model",
+            "vlt.output.openxr_session",
             "vlt.output.micproxy_linux",   # Linux 麦克风代理（pw-cat 管道 + 运行时声明虚拟麦）
             "xr",                          # pyopenxr 本体
         ],
