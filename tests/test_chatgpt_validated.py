@@ -6,6 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from audio_test_fakes import no_audio_device
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vlt.session.base import SessionConfig, create_session
@@ -18,6 +19,7 @@ QUIET = bytes(16000)
 
 class ValidatedTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.enterContext(no_audio_device())
         self.verdict = dict(approved=True, language='ja', meaning=True, numbers=True,
                             negation=True, complete=True, extra_content=False)
         self.services = SimpleNamespace(
@@ -34,8 +36,7 @@ class ValidatedTests(unittest.IsolatedAsyncioTestCase):
                             ('vlt.session.chatgpt_validated.tls_context', Mock()),
                             ('vlt.session.chatgpt_relay.SubscriptionRelay', Mock(return_value=self.services)),
                             ('vlt.session.chatgpt_live.CodexRPC', Mock(side_effect=AssertionError('inference executor constructed'))),
-                            ('asyncio.create_subprocess_exec', AsyncMock(side_effect=AssertionError('process launched'))),
-                            ('sounddevice.RawOutputStream', Mock(side_effect=AssertionError('device opened')))]:
+                            ('asyncio.create_subprocess_exec', AsyncMock(side_effect=AssertionError('process launched')))]:
             p = patch(name, value)
             p.start()
             self.addCleanup(p.stop)

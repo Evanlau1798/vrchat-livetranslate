@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from audio_test_fakes import no_audio_device
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,9 +32,7 @@ def block(vm):
 
 class PlaybackTailTests(unittest.TestCase):
     def setUp(self):
-        self.no_device = patch("sounddevice.RawOutputStream", side_effect=AssertionError("device opened"))
-        self.no_device.start()
-        self.addCleanup(self.no_device.stop)
+        self.enterContext(no_audio_device())
 
     def test_virtualmic_drains_tail_once_and_pads(self):
         vm = buffer()
