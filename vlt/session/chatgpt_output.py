@@ -38,10 +38,25 @@ def same(first, second):
 
 def combined(approvals):
     """A delayed mixed-direction frame retains each row's own authorization."""
-    tagged = tuple((approval, who) for approval, who in approvals if approval is not None)
-    if not tagged:
+    tagged = tuple(approvals)
+    if not any(approval is not None for approval, _ in tagged):
         return None
     return _Combined(tagged)
+
+
+def select_rows(entries, approval, latest=False):
+    """Keep row identities aligned, including legacy rows, when selecting a view."""
+    entries = tuple(entries)
+    if isinstance(approval, _Combined):
+        if len(entries) != len(approval.rows):
+            return (), approval
+        pairs = [(row, tag) for row, tag in zip(entries, approval.rows) if allowed(*tag)]
+        if latest:
+            pairs = pairs[-1:]
+        return tuple(row for row, _ in pairs), combined(tag for _, tag in pairs)
+    if not allowed(approval):
+        return (), approval
+    return entries[-1:] if latest else entries, approval
 
 
 @contextmanager

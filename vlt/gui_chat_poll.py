@@ -68,6 +68,8 @@ def poll(ctx: ChatCtx, root: tk.Misc,
                             who=f"peer:{item[2]}", label=item[1])
                 if ctx.push_overlay_fn:
                     ctx.push_overlay_fn()
+                if ctx.push_desktop_fn:
+                    ctx.push_desktop_fn()
             elif kind == "room_status":
                 # 房间链路状态：按行首符号定状态栏颜色级别
                 txt = str(item[1])
@@ -118,6 +120,8 @@ def poll(ctx: ChatCtx, root: tk.Misc,
     dov = ctx.desktop_out_fn() if ctx.desktop_out_fn else None
     if dov is not None:
         dov.tick()
+        if getattr(dov, 'available', True) is False and ctx.push_desktop_fn:
+            ctx.push_desktop_fn()
 
     # 房间行状态每 0.5s 刷一次
     _now = time.monotonic()

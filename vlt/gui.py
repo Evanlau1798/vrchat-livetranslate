@@ -51,7 +51,6 @@ def _yaml_write(p: Path, fn, *, err="保存"):
     if not p.exists(): return
     try: text = p.read_text(encoding="utf-8"); text = fn(text); _write_config_text(p, text)
     except Exception as exc: print(f"[gui] {err}失败：{exc}", flush=True)
-#: 一看就知道是测试入口的文件名（`python tests/test_x.py` 那条路走的是 `test_` 前缀）
 # gui.py ↔ EngineCtx 双向同步的属性名
 _GATE_HINT = "只有响度超过门限的声音才会被翻译；改完立刻生效（勾选「启用」后这里显示实时电平）"
 _E2G = ["engines", "engine_dirs", "specs", "sinks", "pending_starts", "current",
@@ -91,12 +90,7 @@ class TranslationGUI(ProxyMethods):
         self._gate_level_canvas: tk.Canvas | None = None; self._gate_level_lbl: ttk.Label | None = None
         self._gate_level_hold = LEVEL_FLOOR_DB; self._gate_level_tick = 0; self._gate_probe: Any = None; self._gate_save_job: str | None = None
         self._gate_hold_ms = 500.0; self._gate_preroll_ms = 250; self._audio_ctx = AudioCtx(); self._proxy = None
-        # 设备名唯一真源：只由设备扫描（gui_audio.on_device_scan_result）写入。
-        # ⚠️ 曾经这里另存一份 `_mic_names/_loopback_names/_audio_out_names` 镜像、并在
-        #    `gui_audio.sync_from_gui` 里回写本字典 —— 而启动扫描走的是同步路径、
-        #    不经过 `_on_device_scan_result`，镜像永远是空的，于是每次同步都把刚扫到的
-        #    设备名清空，`on_device_change` 按下标取名字失败 → `mic_device` 存成空串
-        #    （表现：改麦克风下拉无效、永远用系统默认）。别再引入第二份名字表。
+        # 设备名只由扫描回调写入；同步旧镜像会清空扫描结果并误存为默认设备。
         self._names_holder: dict[str, list[str]] = {"mic": [], "loop": [], "out": []}
         self._scan_holder = {"pending": False, "names": self._names_holder}
         self._gate_holder = {"probe": self._gate_probe, "save_job": self._gate_save_job,
@@ -250,7 +244,6 @@ class TranslationGUI(ProxyMethods):
     def _ov_fn(self): return self._cfg.overlay if isinstance(self._cfg.overlay, dict) else {}
     def _wire_desktop_ctx(self) -> None:
         """把设置页的「落盘 / 拖动」回调接到本类的薄壳上。
-
         ⚠️ 桌面字幕的**唯一**保存在 gui_engine（root / 活实例 / 引擎 ctx 同步都在那边）。
         设置页的滑块只认自己那份 DesktopCtx，持久化必须回调进来 —— 早先 gui_desktop 里
         另留了一整套同名实现且 `root` 没接上，于是滑块改了既不落盘也不热重载（回归）。
@@ -392,7 +385,10 @@ class TranslationGUI(ProxyMethods):
         self._save_ui_state()
     def _stop_desktop(self):
         self._sync_engine_ctx(); gui_engine.stop_desktop(self._engine_ctx); self._desktop_out = self._engine_ctx.desktop_out; self._desktop_dragging = False; self._unsync_engine_ctx()
-    def _push_desktop(self, force=False): self._engine_ctx.desktop_out = self._desktop_out; self._engine_ctx.bubbles = self._bubbles; gui_engine.push_desktop(self._engine_ctx, force=force)
+    def _push_desktop(self, force=False):
+        self._engine_ctx.desktop_out = self._desktop_out; self._engine_ctx.bubbles = self._bubbles
+        gui_engine.push_desktop(self._engine_ctx, force=force)
+        self._desktop_out = self._engine_ctx.desktop_out; self._desktop_dragging = self._engine_ctx.desktop_dragging
     def _on_desktop_alpha(self, _v=""):
         # 透明度：立刻贴到活窗口 + 防抖落盘。实现只有 gui_desktop 一份（它读 DesktopCtx），
         # 落盘再回调到 _schedule_desktop_save；改完后把「动过」标志镜像回本类（供同步/测试读）。
@@ -438,7 +434,6 @@ class TranslationGUI(ProxyMethods):
     def _on_refresh_devices(self) -> None:
         self._sync_audio_ctx(); gui_audio.on_refresh_devices(self._audio_ctx, self._root, self._engines, self._headless, self._scan_holder, cfg=self._cfg)
     # ── 麦克风代理（MicProxy）：常驻虚拟声卡路由，与翻译解耦 ──
-
     def _on_device_scan_result(self, mics, loops, outs) -> None:
         self._sync_audio_ctx(); gui_audio.on_device_scan_result(self._audio_ctx, self._cfg, mics, loops, outs, self._names_holder, self._scan_holder)
         self._device_scan_pending = self._scan_holder.get("pending", False)

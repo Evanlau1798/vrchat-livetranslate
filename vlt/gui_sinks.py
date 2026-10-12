@@ -12,7 +12,8 @@ from .session.chatgpt_output import allowed, combined, scope
 
 
 def _approved_rows(bubbles):
-    rows = [b for b in bubbles if allowed(getattr(b, 'approval', None), b.who)][-8:]
+    rows = [b for b in bubbles if (b.text or '').strip()
+            and allowed(getattr(b, 'approval', None), b.who)][-8:]
     entries = [(b.who, b.source, b.text, b.label) for b in rows]
     approval = combined((getattr(b, 'approval', None), b.who) for b in rows)
     return entries, approval
@@ -70,7 +71,9 @@ def start_desktop(ctx: EngineCtx, *, force: bool = False) -> bool:
     失败只禁用这一项，绝不影响翻译。
     """
     if ctx.desktop_out is not None:
-        return True
+        if ctx.desktop_out.available:
+            return True
+        stop_desktop(ctx)
     if not force and "desktop" not in ctx.sinks:
         return False
     try:
@@ -81,7 +84,7 @@ def start_desktop(ctx: EngineCtx, *, force: bool = False) -> bool:
             return False                  # start() 内部已打印原因
         ctx.desktop_out = out
         push_desktop(ctx, force=True)
-        return True
+        return bool(ctx.desktop_out is out and out.available)
     except Exception as exc:              # noqa: BLE001
         ctx.desktop_out = None
         print(f"[gui] ⚠️ 桌面字幕初始化异常，已禁用（翻译不受影响）："
@@ -117,6 +120,14 @@ def push_desktop(ctx: EngineCtx, force: bool = False) -> None:
     if ctx.desktop_out is None:
         return
     try:
+        if not ctx.desktop_out.available:
+            stop_desktop(ctx)
+            ctx.sinks.discard('desktop')
+            if ctx.desktop_var is not None:
+                ctx.desktop_var.set(False)
+            if ctx.set_status_fn:
+                ctx.set_status_fn('warn', t('桌面字幕没启动起来，已自动取消勾选'))
+            return
         entries, approval = _approved_rows(ctx.bubbles)
         with scope(approval):
             ctx.desktop_out.update_entries(entries, force=force)

@@ -1,5 +1,6 @@
 """Offline GUI history must retain each segment's output authorization."""
 import asyncio
+import queue
 import sys
 import unittest
 from pathlib import Path
@@ -31,7 +32,7 @@ class GuiApprovalTests(unittest.TestCase):
         self.frames = []
         def receive(entries, **kwargs):
             self.frames.append((entries, current()))
-        sink = SimpleNamespace(update_entries=receive)
+        sink = SimpleNamespace(update_entries=receive, available=True)
         self.ctx = SimpleNamespace(bubbles=self.chat.bubbles,
                                    overlay_out=sink, desktop_out=sink)
 
@@ -50,6 +51,25 @@ class GuiApprovalTests(unittest.TestCase):
         self.push()
         self.assertEqual([entries for entries, _ in self.frames], [[], []])
         self.assertEqual(len(self.chat.bubbles), 1)  # Stored history is not deleted.
+
+    def test_room_queue_updates_both_sinks_without_later_text_event(self):
+        from vlt.gui_chat_poll import poll
+        for final in (False, True):
+            with self.subTest(final=final):
+                chat, frames = ChatCtx(q=queue.Queue()), []
+                ctx = SimpleNamespace(bubbles=chat.bubbles)
+                for name in ('overlay_out', 'desktop_out'):
+                    setattr(ctx, name, SimpleNamespace(update_entries=lambda entries, name=name, **kwargs:
+                        frames.append((name, entries, current())), available=True))
+                chat.push_overlay_fn = lambda: push_overlay(ctx)
+                chat.push_desktop_fn = lambda: push_desktop(ctx)
+                chat.q.put(('room', 'Nickname', 'peer-id', 'room sentence', final))
+                poll(chat, Mock(), Mock(), lambda source, text, is_final, **kwargs:
+                     add_text(chat, source, text, is_final, **kwargs), Mock(), {})
+                self.assertEqual([name for name, _, _ in frames], ['overlay_out', 'desktop_out'])
+                for _, entries, approval in frames:
+                    self.assertEqual(entries, [('peer:peer-id', '', 'room sentence', 'Nickname')])
+                    self.assertIsNone(approval)
 
     def test_each_direction_keeps_its_own_approval(self):
         mine, theirs = Approval(), Approval('theirs')
