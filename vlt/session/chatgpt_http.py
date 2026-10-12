@@ -4,6 +4,7 @@ from __future__ import annotations
 import http.client
 import re
 import socket
+import ssl
 import threading
 import time
 from concurrent.futures import Future, TimeoutError
@@ -63,6 +64,25 @@ class _Response(http.client.HTTPResponse):
 
 _DNS = {}
 _DNS_LOCK = threading.Lock()
+_TLS_CONTEXT = None
+_TLS_LOCK = threading.Lock()
+
+
+def tls_context():
+    # Native Windows CA enumeration holds the GIL long enough to interrupt audio callbacks.
+    # shortcut: trust store changes take effect on restart; refresh if runtime CA reload is needed.
+    global _TLS_CONTEXT
+    with _TLS_LOCK:
+        if _TLS_CONTEXT is None:
+            try:
+                context = ssl.create_default_context()
+                context.set_alpn_protocols(['http/1.1'])
+                if context.post_handshake_auth is not None:
+                    context.post_handshake_auth = True
+            except Exception:
+                raise RuntimeError('http-uncertain') from None
+            _TLS_CONTEXT = context
+        return _TLS_CONTEXT
 
 
 def _remaining(deadline):
@@ -123,7 +143,7 @@ def request(operation, body, headers):
     host, path, limit, body_limit = _OPERATIONS[operation]
     if len(body) > body_limit:
         raise RuntimeError('request-invalid')
-    connection = http.client.HTTPSConnection(host, timeout=35)
+    connection = http.client.HTTPSConnection(host, timeout=35, context=tls_context())
     connection.response_class = _Response
     deadline = time.monotonic() + 35
     connection._create_connection = lambda *args, **kwargs: _connect(host, deadline)

@@ -11,6 +11,7 @@ from ..ui_text import TARGET_LANGS
 from .chatgpt_browser_page import PAGE
 from .chatgpt_candidate import CandidateBridge
 from .chatgpt_events import bounded_json
+from .chatgpt_http import tls_context
 from .chatgpt_voice_events import VoiceEvents
 
 _DEADLINE = 120
@@ -114,7 +115,8 @@ class NativeVoice:
             'Authorization': 'Bearer ' + credentials.access,
             'ChatGPT-Account-Id': credentials.account,
             'originator': 'codex_cli_rs', 'openai-alpha': 'quicksilver=v2'},
-            proxy=None, open_timeout=15, close_timeout=2, max_size=256000, max_queue=16, compression=None)
+            ssl=tls_context(), proxy=None, open_timeout=15, close_timeout=2,
+            max_size=256000, max_queue=16, compression=None)
         # 私有 Location 已由固定 HTTP adapter 校驗；WebSocket 也禁止 redirect。
         connection.process_redirect = lambda error: error
         self.socket = await connection
