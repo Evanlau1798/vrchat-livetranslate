@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from .output.overlay import DegradedNoteRelay
 
 
 @dataclass
@@ -48,6 +49,7 @@ class ChatCtx:
     overlay_out_fn: Optional[Callable] = None      # () -> Overlay | None
     desktop_out_fn: Optional[Callable] = None      # () -> DesktopOverlay | None
     pending_starts_fn: Optional[Callable] = None   # () -> int
+    overlay_note_relay: DegradedNoteRelay = field(default_factory=DegradedNoteRelay)
 
     # ── 状态栏 ──
     last_status_level: str = "info"

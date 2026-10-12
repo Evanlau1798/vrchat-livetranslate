@@ -117,6 +117,10 @@ class TranslatedSink:
     def opened(self) -> bool:
         return self._p.opened
 
+    @property
+    def mic_reference_db(self) -> float | None:
+        return self._p.mic_reference_db
+
     def push(self, pcm_48k_stereo: bytes) -> None:
         buf = self._p._translated
         if buf is not None:

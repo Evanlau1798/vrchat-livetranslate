@@ -117,6 +117,7 @@ def poll(ctx: ChatCtx, root: tk.Misc,
     ov = ctx.overlay_out_fn() if ctx.overlay_out_fn else None
     if ov is not None:
         ov.tick()
+        ctx.overlay_note_relay.relay(ov, set_status_fn)
     dov = ctx.desktop_out_fn() if ctx.desktop_out_fn else None
     if dov is not None:
         dov.tick()

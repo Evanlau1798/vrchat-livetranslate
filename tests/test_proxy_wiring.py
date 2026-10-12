@@ -22,8 +22,16 @@
   (a) 代理不可用（没找到虚拟声卡）→ **不注入**引擎、界面回落、状态栏 + 日志各留一行痕；
   (b) 代理可用（打桩）→ 引擎拿到 `proxy.translated_sink`；
   (c) 翻译启停 → `set_translation_active(True/False)`；
-  (d) 设置页关掉勾选 → 走真正的 `_restart_proxy()`：关代理、引擎回到自建。
-外加两条顺带钉住的：缓冲改动落到 `reopen_with()`；退出时 `close()` 幂等。
+  (d) 设置页关掉勾选 → 走真正的 `_restart_proxy()`：关代理、引擎重接线回自建。
+外加 review #1/#3/#5 补的五条 —— **翻译进行中**开 / 关代理的重接线（issue #90）：
+  (e1) 开 → 递 `translated_sink`，并补 `set_translation_active(True)`（#1 的钉子）+ 按口径切档；
+  (e2) 没勾「译音输出」/ 方向不含「我说」→ 只通知、**绝不**切译音档；
+  (e3) 开代理重接线失败（返回 False / 抛异常）→ warn + 专门文案；
+  (e4) 关代理重接线失败 → warn + 专门文案；
+  (e5) 老引擎没有 `rebind_audio_sink` → 开/关都仍走旧的明确提示（不假装接上）。
+为什么 (e) 这一层非有不可：替身以前**没有** `rebind_audio_sink`，GUI 侧的新分支永远只走到
+`(0, 0)` 的旧回退路径 —— #1 那个漏调 `set_translation_active(True)` 的 bug 就是这么溜过去的。
+再加两条顺带钉住的：缓冲改动落到 `reopen_with()`；退出时 `close()` 幂等。
 """
 from __future__ import annotations
 
@@ -33,6 +41,7 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import time
 import types
 from pathlib import Path
@@ -349,6 +358,7 @@ class _FakeProxy:
         self.mode = mode
         self.opened = True
         self.active_calls: list[bool] = []
+        self.mode_calls: list[str] = []
         self.reopen_calls: list[tuple] = []
         self.mic_calls: list = []
         self.close_calls = 0
@@ -364,6 +374,7 @@ class _FakeProxy:
             self.mode = MODE_PASSTHROUGH             # 与真代理同语义：停翻译即回落
 
     def set_mode(self, mode: str) -> bool:
+        self.mode_calls.append(mode)
         if mode == MODE_TRANSLATED and True not in self.active_calls:
             return False
         self.mode = mode
@@ -381,7 +392,12 @@ class _FakeProxy:
 
 
 class _FakeEngine:
-    """引擎替身：本文件只关心构造参数里的 `audio_sink` 有没有被注进来。"""
+    """引擎替身：记构造参数里的 `audio_sink`，也记运行期 `rebind_audio_sink` 的调用。
+
+    `rebind_audio_sink` 是 review #3 的关键：以前替身没有它，GUI 侧「翻译进行中开/关代理」
+    的新分支永远只走到 `(0, 0)` 的旧回退路径 —— #1 那个漏调 `set_translation_active(True)`
+    的 bug 就是这么溜过去的。*rebind_result* / *rebind_raises* 用来打失败与异常两条分支。
+    """
 
     instances: list = []
 
@@ -390,6 +406,9 @@ class _FakeEngine:
         self.running = False
         self.start_calls = 0
         self.stop_requests = 0
+        self.rebind_calls: list = []
+        self.rebind_result = True
+        self.rebind_raises: Exception | None = None
         _FakeEngine.instances.append(self)
 
     def start(self) -> None:
@@ -402,6 +421,23 @@ class _FakeEngine:
 
     def wait_stopped(self, timeout: float = 5.0) -> bool:   # noqa: ARG002
         return True
+
+    def rebind_audio_sink(self, sink):                      # noqa: ANN001
+        """记下 GUI 递过来的 sink（开代理=代理的 translated_sink，关代理=None）。"""
+        self.rebind_calls.append(sink)
+        if self.rebind_raises is not None:
+            raise self.rebind_raises
+        return self.rebind_result
+
+
+class _LegacyFakeEngine(_FakeEngine):
+    """**老实现**替身：没有 `rebind_audio_sink` —— 钉住 GUI 的旧回退留痕那条路。
+
+    影子成 ``None`` 就够了：GUI 侧的守卫是 `callable(getattr(e, "rebind_audio_sink", None))`
+    （见 `gui_proxy._rebind_running_engines`），不可调用即跳过、既不计成功也不计失败。
+    """
+
+    rebind_audio_sink = None
 
 
 @contextlib.contextmanager
@@ -596,7 +632,7 @@ def test_translation_start_stop_notifies_proxy() -> None:
 
 
 def test_settings_toggle_off_restarts_proxy_and_unwires_engine() -> None:
-    """(d) 设置页取消勾选 → 真走 `_restart_proxy()`：关代理、引擎回到自建。"""
+    """(d) 设置页取消勾选 → 真走 `_restart_proxy()`：关代理、引擎重接线回自建。"""
     from vlt import gui_engine
     from vlt.i18n import t
 
@@ -607,7 +643,8 @@ def test_settings_toggle_off_restarts_proxy_and_unwires_engine() -> None:
         gui._proxy = fake
         running = _FakeEngine()
         running.running = True
-        gui._engines = [running]                     # 翻译进行中关代理 → 必须额外警告
+        gui._engines = [running]                     # 翻译进行中关代理 → 必须重接线 + 留痕
+        gui._engine_dirs = ["mine"]                  # 与 _engines 对齐（zip 取方向）
 
         gui._proxy_enabled_var.set(False)
         buf = io.StringIO()
@@ -625,11 +662,15 @@ def test_settings_toggle_off_restarts_proxy_and_unwires_engine() -> None:
         assert fake.close_calls == 1, f"应调用一次 close()：{fake.close_calls}"
         assert gui._proxy is None, "关掉后引用应摘掉"
 
+        # ★ 在跑引擎的译音输出腿被整条换回「引擎自建」（None = 断开注入的 sink）
+        assert running.rebind_calls == [None], \
+            f"关代理必须对在跑引擎下发 rebind_audio_sink(None)：{running.rebind_calls!r}"
+
         # 可见降级双留痕
         assert any(ln.startswith("[proxy]") for ln in out.splitlines()), \
             f"关代理必须留痕：{out!r}"
-        assert "本轮译音输出已失效" in out, \
-            f"翻译进行中关代理，必须说清楚这一轮译音没人接管了：{out!r}"
+        assert "切回引擎自建" in out, \
+            f"翻译进行中关代理且重接线成功，必须如实说明腿换回了自建：{out!r}"
         assert seen[-1] == ("info", t("麦克风代理已关闭（回到旧行为）")), f"状态栏文案不对：{seen[-1]!r}"
         assert gui._proxy_hint.cget("text") == t(
             "已关闭：回到旧行为（译音输出随翻译启停，主界面切换开关置灰）"), \
@@ -649,15 +690,227 @@ def test_settings_toggle_off_restarts_proxy_and_unwires_engine() -> None:
             with contextlib.redirect_stdout(buf2):
                 gui._on_proxy_toggle()
                 _settle()                # 收编直通线程那行异步留痕
+            out2 = buf2.getvalue()
             assert gui._proxy is not None and gui._proxy.opened, \
-                f"重新勾选后代理应起来；输出={buf2.getvalue()!r}"
+                f"重新勾选后代理应起来；输出={out2!r}"
+            # ★ review #1 的端到端钉子：**真** MicProxy 也必须被告知「翻译在跑」，
+            #   否则 set_mode(MODE_TRANSLATED) 被拒 → 这一轮根本听不到译音。
+            assert gui._proxy.mode == MODE_TRANSLATED, \
+                f"勾了译音输出且有在跑的 mine 腿 → 档位应切到译音；输出={out2!r}"
+            assert "当前档位 译音" in out2, f"留痕必须如实报当前档位：{out2!r}"
             assert seen[-1] == ("info", t("麦克风代理已启用")), f"状态栏文案不对：{seen[-1]!r}"
             data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
             proxy_cfg = ((data.get("output") or {}).get("audio") or {}).get("proxy") or {}
             assert proxy_cfg.get("enabled") is True, f"重新勾选没落盘：{proxy_cfg!r}"
             with contextlib.redirect_stdout(io.StringIO()):
                 gui._close_proxy()       # 撤补丁前收尾：别让麦克风线程去碰真实采集后端
-    print("  ✓ (d) 设置页勾选框 → 真 _restart_proxy()：关代理/引擎自建/重新勾选能起来（均留痕）")
+    print("  ✓ (d) 设置页勾选框 → 真 _restart_proxy()：关代理重接线回自建/重新勾选起代理并切译音档")
+
+
+# ---------------------------------------------------------------- (e) 中途开/关代理的重接线
+
+
+def _arm_running_engine(gui, proxy=None, *, direction: str = "mine",   # noqa: ANN001
+                        vmic: bool = True, legacy: bool = False):
+    """摆好「翻译进行中」的最小现场：一个在跑引擎 + 它的方向 + 「译音输出」勾选框。
+
+    *legacy* = 用**没有** `rebind_audio_sink` 的老替身（钉 GUI 的旧回退留痕那条路）。
+    """
+    eng = _LegacyFakeEngine() if legacy else _FakeEngine()
+    eng.running = True
+    gui._engines = [eng]
+    gui._engine_dirs = [direction]
+    gui._engine_ctx.vmic_var = _Var(vmic)
+    if proxy is not None:
+        gui._proxy = proxy
+    return eng
+
+
+def test_enable_midway_rebinds_and_arms_proxy_translation() -> None:
+    """(e1) 翻译进行中**开**代理 → 递 `translated_sink`，并补 `set_translation_active(True)`。
+
+    ★ review #1 的钉子：新建的 `MicProxy` 里 `_translation_active` 默认 False，而
+    `set_mode(MODE_TRANSLATED)` 在它为假时**直接拒** —— 少了这一手，引擎已把译音 PCM 灌进
+    代理的 translated 环形缓冲，代理却停在原声档、没人 drain（溢出丢弃），用户点
+    「原声/译音」还会被告知「翻译未运行」→ 这一轮根本听不到译音。
+
+    ★ **故障注入**：把 `gui_proxy._restart_proxy` 里那句 `self._proxy_adopt_translation(proxy)`
+    去掉 → `fake.active_calls` 是空的、档位停在原声 → 本用例变红。
+    """
+    from vlt.i18n import t
+
+    with _wired_gui() as (gui, _cfg_path):
+        seen = _capture_statuses(gui)
+        _wire_settings_controls(gui, enabled=True)
+        fake = _FakeProxy()
+        # 配置里 proxy.enabled=true（临时配置写的）→ `_restart_proxy()` 走 enable 分支；
+        # `_start_proxy()` 见 `self._proxy` 已在就直接返回 True（不碰任何真实设备）。
+        eng = _arm_running_engine(gui, fake)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            gui._restart_proxy()
+        out = buf.getvalue()
+
+        assert eng.rebind_calls == [fake.translated_sink], \
+            f"开代理必须把代理的 translated_sink 递给在跑引擎：{eng.rebind_calls!r}"
+        assert fake.active_calls == [True], \
+            f"★ review #1：重接线成功后必须补 set_translation_active(True)：{fake.active_calls!r}"
+        assert fake.mode_calls == [MODE_TRANSLATED], \
+            f"勾了译音输出 + 有在跑的 mine 腿 → 应按 start() 的口径切译音档：{fake.mode_calls!r}"
+        assert fake.mode == MODE_TRANSLATED, f"档位应真的切过去了：{fake.mode!r}"
+        assert "当前档位 译音" in out, f"留痕必须如实报当前档位：{out!r}"
+        assert seen[-1] == ("info", t("麦克风代理已启用")), f"状态栏文案不对：{seen[-1]!r}"
+    print("  ✓ (e1) 中途开代理：递 translated_sink + set_translation_active(True) + 切译音档")
+
+
+def test_enable_midway_keeps_passthrough_when_no_voice_output() -> None:
+    """(e2) 中途开代理但**不该出声** → 只通知「翻译在跑」，**绝不**切译音档。
+
+    口径与 `gui_engine.start()` 完全一致（那边是 `want_audio` 才切）：没勾「译音输出」、
+    或当前方向不含「我说」时切到译音档 = 让对方听静音，比原声更糟。
+
+    ★ **故障注入**：把 `_proxy_adopt_translation` 里的 `if not self._proxy_translated_wanted()`
+    那道门去掉（无条件 `set_mode(MODE_TRANSLATED)`）→ `fake.mode_calls` 不再是空 → 变红。
+    """
+    with _wired_gui() as (gui, _cfg_path):
+        _capture_statuses(gui)
+        _wire_settings_controls(gui, enabled=True)
+
+        # (a) 没勾「译音输出」
+        fake = _FakeProxy()
+        _arm_running_engine(gui, fake, vmic=False)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            gui._restart_proxy()
+        out = buf.getvalue()
+        assert fake.active_calls == [True], "翻译在跑就必须让代理知道（与档位无关）"
+        assert fake.mode_calls == [], f"没勾译音输出就不该去切档：{fake.mode_calls!r}"
+        assert fake.mode == MODE_PASSTHROUGH, f"档位应停在原声：{fake.mode!r}"
+        assert "当前档位 原声" in out, f"留痕必须如实报档位：{out!r}"
+        assert "保持原声" in out, f"必须说清为什么没切档：{out!r}"
+
+        # (b) 勾了，但当前方向只有「别人说」（译音输出只对「我说」那条腿有效）
+        fake2 = _FakeProxy()
+        _arm_running_engine(gui, fake2, direction="theirs", vmic=True)
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            gui._restart_proxy()
+        assert fake2.active_calls == [True], "同上：通知与档位是两件事"
+        assert fake2.mode_calls == [], f"方向不含「我说」就不该切档：{fake2.mode_calls!r}"
+        assert fake2.mode == MODE_PASSTHROUGH, f"档位应停在原声：{fake2.mode!r}"
+        assert "当前档位 原声" in buf2.getvalue(), f"留痕必须如实报档位：{buf2.getvalue()!r}"
+    print("  ✓ (e2) 中途开代理但没勾译音输出 / 方向是 theirs → 只通知、档位保持原声")
+
+
+def test_enable_midway_rebind_failure_warns() -> None:
+    """(e3) 开代理时重接线失败（返回 False / 抛异常）→ 状态栏 warn + 日志 WARN 行。
+
+    ★ review #5：文案必须是**专门**那条（「引擎译音输出重接线失败…」），不能拿
+    「麦克风代理不可用（虚拟声卡没打开？）」去描述引擎侧的故障 —— 那会把人引去查声卡。
+    失败时还**绝不**去 `set_translation_active(True)`：译音根本没接上代理，通知了只会
+    让用户切到一个没人喂的译音档。
+    """
+    from vlt.i18n import t
+
+    want = ("warn", t("引擎译音输出重接线失败（本轮译音未接上代理，"
+                      "重新点「开始翻译」可恢复）"))
+
+    for label, arm in (("返回 False", lambda e: setattr(e, "rebind_result", False)),
+                       ("抛异常", lambda e: setattr(e, "rebind_raises",
+                                                    RuntimeError("boom")))):
+        with _wired_gui() as (gui, _cfg_path):
+            seen = _capture_statuses(gui)
+            _wire_settings_controls(gui, enabled=True)
+            fake = _FakeProxy()
+            eng = _arm_running_engine(gui, fake)
+            arm(eng)
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                gui._restart_proxy()
+            out = buf.getvalue()
+
+            assert seen[-1] == want, f"[{label}] 状态栏文案不对：{seen[-1]!r}"
+            warns = [ln for ln in out.splitlines() if ln.startswith("[proxy] ⚠️")]
+            assert warns, f"[{label}] 失败必须在日志留 WARN 行：{out!r}"
+            assert fake.active_calls == [], \
+                f"[{label}] 没接上就不许通知代理「翻译在跑」：{fake.active_calls!r}"
+            assert fake.mode_calls == [], f"[{label}] 更不该去切档：{fake.mode_calls!r}"
+    print("  ✓ (e3) 开代理重接线失败（False / 抛异常）→ warn + 专门文案 + 不通知代理")
+
+
+def test_disable_midway_rebind_failure_warns() -> None:
+    """(e4) 关代理时引擎没能切回自建 → 状态栏 warn + 专门文案（review #5）。
+
+    以前这里借用「打开虚拟声卡失败：{err}」再塞 `err="engine rebind"` —— 状态栏于是显示
+    「打开虚拟声卡失败：engine rebind」，既不是人话也指错了故障点。
+    """
+    from vlt.i18n import t
+
+    with _wired_gui() as (gui, _cfg_path):
+        seen = _capture_statuses(gui)
+        _wire_settings_controls(gui, enabled=True)
+        fake = _FakeProxy()
+        eng = _arm_running_engine(gui, fake)
+        eng.rebind_result = False
+        gui._sync_proxy_cfg_mem(proxy={"enabled": False})   # 配置关掉 → 走 disable 分支
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            gui._restart_proxy()
+        out = buf.getvalue()
+
+        assert eng.rebind_calls == [None], \
+            f"关代理必须下发 rebind_audio_sink(None)：{eng.rebind_calls!r}"
+        assert fake.close_calls == 1 and gui._proxy is None, "代理本身应被关掉"
+        assert seen[-1] == ("warn", t("引擎切回自建译音输出失败（虚拟声卡打不开？"
+                                      "本轮译音不出声，重新点「开始翻译」可恢复）")), \
+            f"状态栏文案不对：{seen[-1]!r}"
+        assert any(ln.startswith("[proxy] ⚠️") for ln in out.splitlines()), \
+            f"失败必须留 WARN 行：{out!r}"
+    print("  ✓ (e4) 关代理重接线失败 → warn + 专门文案（不再借用「打开虚拟声卡失败」）")
+
+
+def test_legacy_engine_without_rebind_keeps_old_hints() -> None:
+    """(e5) 在跑引擎**没有** `rebind_audio_sink`（老实现 / 替身）→ 仍走旧的明确提示。
+
+    这条钉的是「(0, 0) 回退路径没被新分支吃掉」：既不许假装接上了（开），也不许
+    悄悄丢掉「本轮译音没人接管」这句（关）。
+    """
+    from vlt.i18n import t
+
+    # (a) 开代理：没能接上 → 如实说明，且绝不通知代理「翻译在跑」
+    with _wired_gui() as (gui, _cfg_path):
+        seen = _capture_statuses(gui)
+        _wire_settings_controls(gui, enabled=True)
+        fake = _FakeProxy()
+        _arm_running_engine(gui, fake, legacy=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            gui._restart_proxy()
+        out = buf.getvalue()
+        assert "不支持重接线" in out, f"必须如实说明没能接上：{out!r}"
+        assert fake.active_calls == [] and fake.mode_calls == [], \
+            f"没接上就不许通知/切档：{fake.active_calls!r} {fake.mode_calls!r}"
+        assert seen[-1] == ("info", t("麦克风代理已启用")), \
+            f"代理本身确实起来了，状态栏不该谎报失败：{seen[-1]!r}"
+
+    # (b) 关代理：仍是旧那句「本轮译音输出已失效」
+    with _wired_gui() as (gui, _cfg_path):
+        seen2 = _capture_statuses(gui)
+        _wire_settings_controls(gui, enabled=True)
+        fake2 = _FakeProxy()
+        _arm_running_engine(gui, fake2, legacy=True)
+        gui._sync_proxy_cfg_mem(proxy={"enabled": False})
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            gui._restart_proxy()
+        out2 = buf2.getvalue()
+        assert "本轮译音输出已失效" in out2, f"旧提示必须还在：{out2!r}"
+        assert seen2[-1] == ("info", t("麦克风代理已关闭（回到旧行为）")), \
+            f"状态栏文案不对：{seen2[-1]!r}"
+    print("  ✓ (e5) 老引擎没有 rebind_audio_sink → 开/关都仍走旧的明确提示（不假装接上）")
 
 
 # ---------------------------------------------------------------- 缓冲即时生效
@@ -744,6 +997,142 @@ def test_mic_device_change_reopens_passthrough() -> None:
     print("  ✓ 改麦：在跑→reopen_mic 即时生效；名字没变 / 代理没跑→不调用")
 
 
+# ---------------------------------------------------------------- 译音音量匹配接线
+
+
+def _fake_translated_pcm(frames: int = 480, amp: int = 4000) -> bytes:
+    """一段 48k 立体声 int16 假译音：*frames* 帧 → ``frames * 4`` 字节。"""
+    return struct.pack("<h", amp) * (frames * 2)
+
+
+def _emit_holder(sink, level):                       # noqa: ANN001, ANN202
+    """只装 `Engine._emit_translated` 真正用到的三样东西（`_virtualmic` / `_level` / `_sink_lock`）。
+
+    不构造真 Engine：那要 API key、要连 WebSocket，而这两条用例验的只是
+    「译音 PCM 的**唯一出口**有没有把匹配器串进去」这一段接线。方法本身取的是
+    `vlt.engine.Engine` 上的**真实现**，不是替身 —— 替身会把接线断掉也测不出来。
+
+    ⚠️ `_sink_lock` 是替身**自带**的：生产侧那个真实现无条件 `with self._sink_lock:`。
+    以前它写的是 `getattr(self, "_sink_lock", None)` + `nullcontext()` 兜底，唯一目的就是
+    迁就本替身 —— 代价是属性将来缺失 / 改名时**锁静默失效**而不是报错（review #4）。
+    替身补这一行，后门就不必留了。
+    """
+    from vlt.engine import Engine
+
+    class _Holder:
+        _emit_translated = Engine._emit_translated
+        _sink_lock = threading.RLock()
+
+        def __init__(self, vm, lv) -> None:           # noqa: ANN001
+            self._virtualmic = vm
+            self._level = lv
+
+    return _Holder(sink, level)
+
+
+def test_emit_translated_without_level_match_is_byte_identical() -> None:
+    """没注入 LevelMatcher（旧行为）/ `mode=off` → push 的内容**逐字节不变**。
+
+    这是 P0 验收：默认档必须与升级前**完全一致**，一个样点都不许动。
+    """
+    import inspect
+
+    from vlt.engine import Engine
+    from vlt.output.level_match import LevelConfig, LevelMatcher
+
+    params = list(inspect.signature(Engine.__init__).parameters)
+    assert "level_match" in params, f"Engine.__init__ 必须有 level_match 形参：{params}"
+    assert params[-1] == "level_match", \
+        f"level_match 必须放在形参末尾（既有调用点才不用改）：{params}"
+
+    pcm = _fake_translated_pcm()
+    sink = _FakeSink()
+    _emit_holder(sink, None)._emit_translated(pcm)
+    assert sink.pushed[-1] == pcm, "没注入匹配器时必须逐字节原样 push（= 升级前的行为）"
+
+    off = LevelMatcher(LevelConfig(mode="off"))
+    _emit_holder(sink, off)._emit_translated(pcm)
+    assert sink.pushed[-1] == pcm, f"mode=off 必须逐字节原样 push（默认档）：{off.gain_db()}"
+    assert off.gain_db() == 0.0, f"off 档增益恒 0：{off.gain_db()}"
+
+    # 没勾「译音输出」（_virtualmic 为 None）→ 一块都不许 push，也不许抛。
+    # ⚠️ 判据要拿**同一个 sink 做差分**：以前这里建了个 `sink2` 却从没把它接进 holder，
+    #    `assert sink2.pushed == []` 于是恒真（接线以后断了也照样绿）= 空断言。
+    sink2 = _FakeSink()
+    holder2 = _emit_holder(sink2, None)
+    holder2._emit_translated(pcm)
+    assert sink2.pushed == [pcm], "正向对照：接着译音输出时该 sink 必须收到这一块"
+    holder2._virtualmic = None            # 相当于用户关掉「译音输出」
+    holder2._emit_translated(pcm)
+    assert sink2.pushed == [pcm], "没有译音输出时不该再有任何 push"
+    print("  ✓ 译音出口：没注入匹配器 / mode=off → 逐字节不变；没有译音输出 → 不 push")
+
+
+def test_emit_translated_with_level_match_processes_bytes() -> None:
+    """注入了 LevelMatcher（`mode=fixed`, −6 dB）→ 长度不变、内容因增益而不同、幅度约减半。"""
+    from vlt.output.level_match import LevelConfig, LevelMatcher
+
+    pcm = _fake_translated_pcm(amp=4000)
+    sink = _FakeSink()
+    m = LevelMatcher(LevelConfig(mode="fixed", fixed_gain_db=-6.0, ceiling_dbfs=-1.0))
+    _emit_holder(sink, m)._emit_translated(pcm)
+
+    out = sink.pushed[-1]
+    assert len(out) == len(pcm), \
+        f"输出字节数必须与输入**完全一致**（下游抖动缓冲靠它算时长）：{len(out)} vs {len(pcm)}"
+    assert out != pcm, "施加了 −6 dB 就不该还是原来那串字节"
+    amp_in = max(abs(x) for x in struct.unpack(f"<{len(pcm) // 2}h", pcm))
+    amp_out = max(abs(x) for x in struct.unpack(f"<{len(out) // 2}h", out))
+    ratio = amp_out / amp_in
+    assert 0.48 <= ratio <= 0.53, f"−6 dB 应把幅度压到约一半：{amp_in} → {amp_out}（{ratio:.3f}）"
+
+    # status() 是界面读数的唯一来源：三个字段都得在（缺一个读数行就会显示半真半假的数）
+    st = m.status()
+    for key in ("mode", "mic_db", "tts_db", "gain_db", "headroom_db", "fallback"):
+        assert key in st, f"status() 少了 {key}：{st!r}"
+    assert st["mode"] == "fixed" and st["gain_db"] == -6.0, st
+    print(f"  ✓ 注入匹配器：字节被处理（{amp_in} → {amp_out}，{ratio:.3f}）且长度恒等；status() 字段齐")
+
+
+def test_mic_pump_feeds_level_reference() -> None:
+    """代理的直通线程真的把每块麦克风数据喂给了电平参考（打桩 `MicReference.feed` 计数）。
+
+    钉的是「**复用同一块数据**」：电平参考绝不新开第二个采集设备 —— 参考电平来自
+    `_mic_pump` 已经在读的那块 chunk，采样率/声道数也必须是采集源的真实值
+    （喂错率会让 100ms 分块算错，中位数就变成一个没有物理意义的数）。
+    """
+    from vlt.output import level_match
+
+    calls: list[tuple[int, int, int]] = []
+    orig = level_match.MicReference.feed
+
+    def _counting(self, pcm, rate, channels, *, now):   # noqa: ANN001
+        calls.append((len(pcm), rate, channels))
+        return orig(self, pcm, rate, channels, now=now)
+
+    level_match.MicReference.feed = _counting            # type: ignore[assignment]
+    try:
+        with _wired_gui() as (gui, _cfg_path):
+            with _stubbed_audio(gui=gui) as src:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    assert gui._start_proxy() is True, "打桩环境下代理应能起来"
+                    _settle(0.3)                         # 让直通线程读完假源的那一块
+                assert calls, ("直通线程必须把麦克风块喂给电平参考"
+                               "（MicReference.feed 一次都没被调到 = 接线断了）")
+                size, rate, ch = calls[0]
+                assert (rate, ch) == (src.rate, src.channels), \
+                    f"喂进去的采样率/声道数必须是采集源的真实值：{(rate, ch)} vs {(src.rate, src.channels)}"
+                assert size > 0 and size % 2 == 0, f"喂进去的必须是 int16 PCM：{size} 字节"
+                ref = gui._proxy.mic_reference_db
+                assert ref is None or isinstance(ref, float), \
+                    f"mic_reference_db 只能是 float 或 None（样本不足时不许猜）：{ref!r}"
+                with contextlib.redirect_stdout(io.StringIO()):
+                    gui._close_proxy()                   # 撤补丁前收尾：别去碰真实采集后端
+    finally:
+        level_match.MicReference.feed = orig             # type: ignore[assignment]
+    print(f"  ✓ 代理直通线程喂了电平参考：{len(calls)} 次（{rate}Hz {ch}ch，复用同一块数据，未新开设备）")
+
+
 # ---------------------------------------------------------------- 入口
 
 
@@ -753,8 +1142,16 @@ def main() -> int:
         test_proxy_available_injects_translated_sink,
         test_translation_start_stop_notifies_proxy,
         test_settings_toggle_off_restarts_proxy_and_unwires_engine,
+        test_enable_midway_rebinds_and_arms_proxy_translation,
+        test_enable_midway_keeps_passthrough_when_no_voice_output,
+        test_enable_midway_rebind_failure_warns,
+        test_disable_midway_rebind_failure_warns,
+        test_legacy_engine_without_rebind_keeps_old_hints,
         test_buffer_change_reaches_running_proxy,
         test_mic_device_change_reopens_passthrough,
+        test_emit_translated_without_level_match_is_byte_identical,
+        test_emit_translated_with_level_match_processes_bytes,
+        test_mic_pump_feeds_level_reference,
     ]
     print("test_proxy_wiring:")
     failed = 0

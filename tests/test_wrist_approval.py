@@ -20,9 +20,14 @@ class Approval:
 
 
 class WristApprovalTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch('vlt.output.openvr_overlay.D3D11Texture',
+                                side_effect=AssertionError('real GPU opened')))
+
     def wrist(self):
         out = WristOverlay(OverlayConfig())
         out.available, out._overlay, out._handle = True, Mock(), 1
+        del out._overlay.setOverlayTexture
         return out
 
     def repaint(self, out):
@@ -47,7 +52,7 @@ class WristApprovalTests(unittest.TestCase):
 
     def test_revoked_during_pixel_conversion_never_uploaded(self):
         out, approval = self.wrist(), Approval()
-        img = Mock(size=(4, 4))
+        img = Mock(mode='RGBA', size=(4, 4))
         def pixels():
             approval.valid = False
             return bytes(64)
@@ -271,7 +276,7 @@ class WristApprovalTests(unittest.TestCase):
 
     def test_close_and_restart_during_pixel_conversion_cannot_upload(self):
         out, approval, replacement = self.wrist(), Approval(), Mock()
-        image = Mock(size=(4, 4))
+        image = Mock(mode='RGBA', size=(4, 4))
         def pixels():
             out.close()
             out.available, out._overlay, out._handle = True, replacement, 2

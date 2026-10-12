@@ -53,7 +53,11 @@ class _WristMaintenance:
         """一行现场信息，故障时决定下一步查什么（永不抛异常）。"""
         age = time.monotonic() - self._last_ok_at if self._last_ok_at else -1.0
         exists = self._overlay_exists()
+        mode = '持久贴图' if self._d3d is not None else ('兼容旧路' if not self._tex_disabled
+                                                       else '兼容旧路(永久)')
         bits = [
+            f"面板={'可用' if self.available else '不可用'}",
+            f"上传路={mode}",
             f"最后成功上传 {age:.0f}s 前" if age >= 0 else "还没成功上传过",
             f"帧数={self.frames_updated}",
             {True: "overlay在", False: "overlay已被丢弃", None: "overlay状态未知"}[exists],
@@ -83,8 +87,11 @@ class _WristMaintenance:
 
     def tick(self) -> None:
         # 配置热重载（位置/尺寸改完存盘即生效，无需重启）
-        if self.dry_run:
+        if self.dry_run or self._closed:
             return
+        self._maybe_apply_anchor()
+        self._maybe_retry_tex_path()
+        self._maybe_reinit()
         if self.config_path and self.config_path.exists():
             mtime = self.config_path.stat().st_mtime
             if mtime != self._last_cfg_mtime:
@@ -125,6 +132,7 @@ class _WristMaintenance:
                     # 淡出阈值只影响每帧算出来的 overlay alpha，不改几何也不改贴图 ——
                     # 但配置对象要换掉，否则改 fade_after_s 存盘不生效。
                     fade_changed = new_cfg.fade_after_s != self.cfg.fade_after_s
+                    size_changed = new_cfg.size_px != self.cfg.size_px
                     if geo_changed or anchor_changed or render_changed or fade_changed:
                         self.cfg = new_cfg
                         if self.available:
@@ -133,6 +141,8 @@ class _WristMaintenance:
                             if geo_changed or anchor_changed:
                                 self._apply_transform()
                             if render_changed:
+                                if size_changed and self._d3d is not None:
+                                    self._rebuild_d3d('size_px 变更')
                                 self._repaint()
                         print(f"[overlay] ♻️ 配置热重载：anchor={new_cfg.anchor} pos={new_cfg.pos} "
                               f"rot={new_cfg.rot} width={new_cfg.width_m}m "
@@ -144,7 +154,7 @@ class _WristMaintenance:
 
         # 健康心跳：定期把「面板还活着吗」写进日志，并在 overlay 已被 SteamVR 丢掉时重建。
         # 放在热重载与淡出之前——它是最该先出结果的一条诊断。
-        if self.available:
+        if not self._closed:
             now = time.monotonic()
             if now - self._last_heartbeat >= self.HEARTBEAT_S:
                 self._last_heartbeat = now

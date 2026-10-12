@@ -199,7 +199,7 @@ STRINGS: dict[str, str] = {
     "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；作用于两个方向 —— 两个方向都要同一个译名时才放这里":
         "One per line as source=target (club names, player names, jargon); applies to BOTH "
         "directions — only put entries here when both directions want the same name",
-    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；只对「{dir}」这条腿生效，同名词条会覆盖全局":
+    "每行一条，格式：原文=译名（社团名 / 人名 / 专有术语）；只对「{dir}」这条通路生效，同名词条会覆盖全局":
         "One per line as source=target (club names, player names, jargon); only affects the "
         "\"{dir}\" leg, and entries here override the global table",
     "保存词库": "Save Glossary",
@@ -402,9 +402,26 @@ STRINGS: dict[str, str] = {
     "手腕屏已开启（位置 / 字号等见「设置 → 手腕屏」）":
         "Wrist overlay is on — position, font size and more are under "
         "\"Settings → Wrist Overlay\"",
-    "手腕屏没启动起来，已自动取消勾选（先把 SteamVR 打开，再勾一次即可）":
-        "The wrist overlay could not start, so the tick was reverted — "
-        "start SteamVR first, then tick it again",
+    "手腕屏没启动起来，已自动取消勾选：{reason}":
+        "The wrist overlay could not start, so the tick was reverted: {reason}",
+    "手腕屏已开启，但锚点设备（手柄 / tracker）还没被追踪：唤醒它面板会自动出现（不用重新勾选）":
+        "The wrist overlay is on, but the anchor device (controller / tracker) is not tracked yet: "
+        "wake it and the panel will appear by itself (no need to tick it again)",
+    # ---- 手腕屏起不来的真因（进状态栏；真因不同解药完全不同，别混成一句「先把 SteamVR 打开」）----
+    "SteamVR 没在运行或不可用：先启动 SteamVR，再勾一次":
+        "SteamVR is not running or not reachable — start it, then tick again",
+    "SteamVR 在跑，但它的合成器没起来：完全退出 SteamVR 再启动一次":
+        "SteamVR is running but its compositor is not — quit SteamVR completely "
+        "and start it again",
+    "SteamVR 在跑，但没检测到头显：戴上头显、确认 SteamVR 里能看到设备，再勾一次":
+        "SteamVR is running but sees no headset — put the headset on, make sure SteamVR "
+        "lists it, then tick again",
+    "选中的锚点设备没被追踪：唤醒手柄 / tracker（或戴上头显）后再勾一次":
+        "The anchor device is not tracked — wake the controller / tracker (or put the "
+        "headset on), then tick again",
+    "原因见日志（程序目录 logs 里最新那份）":
+        "See the log (the newest file in the app folder's logs)",
+
 
     # ---- 桌面字幕（PC 桌面模式叠加窗）----
     "桌面字幕": "Desktop Subtitles",
@@ -442,8 +459,8 @@ STRINGS: dict[str, str] = {
     # ---- 麦克风代理（原声/译音一键切换）----
     # 运行期状态（经 `gui._on_proxy_status`：日志打中文原文、状态栏查这里的词条）。
     # key = 代理发出的中文模板（与 vlt/output/micproxy*.py 逐字一致，含 {占位符}）。
-    "检测到测试进程（{name}）→ 拒绝{action}（这条腿不启用）":
-        "Test process detected ({name}) → refusing to {action} (this leg stays off)",
+    "检测到测试进程（{name}）→ 拒绝{action}（该功能不启用）":
+        "Test process detected ({name}) → refusing to {action} (this path stays off)",
     "未找到输出设备 {dev}，回退到回退链":
         "Output device {dev} not found — falling back to the fallback chain",
     "枚举输出设备失败：{err}（其余功能不受影响）":
@@ -483,6 +500,12 @@ STRINGS: dict[str, str] = {
         "Mic Proxy unavailable (virtual cable not open?); Original/Translated switching disabled",
     "麦克风代理已启用": "Mic Proxy enabled",
     "麦克风代理已关闭（回到旧行为）": "Mic Proxy disabled (back to the old behavior)",
+    "引擎译音输出重接线失败（本轮译音未接上代理，重新点「开始翻译」可恢复）":
+        "Failed to re-wire the engine's translated-audio output "
+        "(this round isn't hooked up to the proxy — click \"Start\" again to recover)",
+    "引擎切回自建译音输出失败（虚拟声卡打不开？本轮译音不出声，重新点「开始翻译」可恢复）":
+        "The engine couldn't switch back to its own translated-audio output "
+        "(virtual cable won't open? This round stays silent — click \"Start\" again to recover)",
     "程序会把真实麦克风直通到虚拟声卡（VRChat 里麦克风固定选它），并常驻占用它的输出流。\n\n如果你的「默认播放设备」也是这块虚拟声卡，会听到自己的声音（回声）。\n不需要的话：设置 → 麦克风代理 → 取消勾选（立即释放声卡）。":
         "The app passes your real microphone through to the virtual sound card (keep VRChat's "
         "microphone set to it) and keeps that card's output stream open while it runs.\n\n"
@@ -500,6 +523,23 @@ STRINGS: dict[str, str] = {
         "Translated Output is unchecked, so Translated mode will be silent (tick it in the output row and try again)",
     "🎙 原声": "🎙 Original",
     "🗣 译音": "🗣 Translated",
+    # ---- 译音音量（固定增益 / 跟随麦克风）----
+    "译音音量": "Translated Audio Volume",
+    "原声与译音共用一条虚拟声卡输出流，VRChat 只能整体调麦克风音量——译音比原声响/轻要在这里修": "Original voice and translated audio share one virtual sound card output stream, and VRChat can only adjust microphone volume as a whole - fix translated audio being louder or quieter than your voice here",
+    "模式:": "Mode:",
+    "固定增益(dB):": "Fixed gain (dB):",
+    "相对麦克风(dB):": "Relative to mic (dB):",
+    "当前增益:": "Current gain:",
+    "改完立即生效（逐句重算，不给译音加缓冲）": "Applies immediately (recomputed per sentence; no extra buffering for translated audio)",
+    "关闭音量匹配": "Off",
+    "固定增益": "Fixed gain",
+    "跟随麦克风": "Follow microphone",
+    "固定增益：所有译音统一加减这么多 dB（负数=更轻）": "Fixed gain: shift all translated audio by this many dB (negative = quieter)",
+    "跟随麦克风：把译音对齐到你说话时的电平（跨设备免调）": "Follow microphone: match translated audio to your own speaking level (no tuning needed across devices)",
+    "已关闭：译音逐字节原样输出（与升级前行为一致）": "Off: translated audio is passed through byte for byte (identical to the behavior before this feature)",
+    "麦克风 {mic} dBFS ｜ 译音 {tts} dBFS ｜ 增益 {gain} dB": "Mic {mic} dBFS | Translated {tts} dBFS | Gain {gain} dB",
+    "译音音量已更新（逐句生效）": "Translated audio volume updated (applies per sentence)",
+    "麦克风电平参考取不到 → 译音音量匹配回落固定增益 {db} dB": "Microphone level reference unavailable - translated volume matching falls back to fixed gain {db} dB",
 }
 from .chatgpt import STRINGS as _CHATGPT
 STRINGS.update(_CHATGPT["en"])

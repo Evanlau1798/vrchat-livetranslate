@@ -216,7 +216,7 @@ class RPCTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('cli_auth_credentials_store="file"', call.args)
                 self.assertIn('forced_login_method="chatgpt"', call.args)
                 env = call.kwargs.get('env', {})
-                self.assertEqual(env.get('CODEX_HOME'), str(root / 'app' / 'codex'))
+                self.assertTrue(Path(env['CODEX_HOME']).samefile(root / 'app' / 'codex'))
                 for name in ('OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'):
                     self.assertNotIn(name, env)
             self.assertEqual(sentinel.read_text(encoding='utf-8'), 'parent credentials')

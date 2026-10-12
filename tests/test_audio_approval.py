@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from audio_test_fakes import no_audio_device
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vlt.session.chatgpt_output import scope
@@ -27,9 +28,7 @@ class Approval:
 
 class AudioApprovalTests(unittest.TestCase):
     def setUp(self):
-        no_device = patch('sounddevice.RawOutputStream', side_effect=AssertionError('device opened'))
-        no_device.start()
-        self.addCleanup(no_device.stop)
+        self.enterContext(no_audio_device())
 
     def consumers(self):
         vm = VirtualMic(device_index=0, device_name='unused', buffer_ms=1)

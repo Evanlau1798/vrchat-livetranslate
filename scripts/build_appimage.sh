@@ -270,7 +270,7 @@ HIDDEN=(
 # 带二进制/数据文件的库 → 连数据一起收
 COLLECT_ALL=(xr pythonosc)
 # Linux 产物里**不允许**出现 Windows 独占实现（与 build_exe.py 的 EXCLUDE_WIN 镜像）
-EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay openvr pyaudiowpatch pycaw comtypes sounddevice)
+EXCLUDES=(vlt.platform.win vlt.output.openvr_overlay vlt.output.win_d3d11 vlt.output.wrist_startup vlt.output.wrist_texture vlt.output.wrist_recovery vlt.output.wrist_maintenance openvr pyaudiowpatch pycaw comtypes sounddevice)
 
 PYI_ARGS=(
     --noconfirm --clean --noupx --onedir
@@ -322,7 +322,11 @@ from PyInstaller.archive.readers import pkg_archive_contents
 exe, vlt_dir = sys.argv[1], pathlib.Path(sys.argv[2])
 names = set(pkg_archive_contents(exe))
 
-forbidden = {"vlt.platform.win", "vlt.output.openvr_overlay"}
+# ⚠️ 这份集合与上面的 EXCLUDES 是**两份**清单，加新的平台独占模块时必须同时改；
+#    tests/test_platform_purity.py 现在会断言两份的 vlt.* 集合一致（漏改即红）。
+forbidden = {"vlt.platform.win", "vlt.output.openvr_overlay", "vlt.output.win_d3d11",
+             "vlt.output.wrist_startup", "vlt.output.wrist_texture", "vlt.output.wrist_recovery",
+             "vlt.output.wrist_maintenance"}
 bad = sorted(n for n in names if any(n == f or n.startswith(f + ".") for f in forbidden))
 assert not bad, f"包里混进了 Windows 独占模块：{bad}"
 
@@ -335,7 +339,11 @@ for p in vlt_dir.rglob("*.py"):
     if name not in forbidden:
         disk.add(name)
 missing = sorted(disk - names)
-assert not missing, f"磁盘上有、包里没有的 vlt 模块（用户拿到手就是 ImportError）：{missing}"
+assert not missing, (
+    f"磁盘上有、包里没有的 vlt 模块：{missing}\n"
+    "    修法：在函数里**按需导入**（importlib / 函数体内 import）的模块 → 加进上面的 HIDDEN；\n"
+    "    如果是故意排除的**平台独占**模块（Windows 才该有）→ 加进 EXCLUDES\n"
+    "    （并同步 scripts/check_platform_purity.py 的 FORBIDDEN[linux]，以及 heredoc 里的 forbidden 集合）")
 
 # 第三方里「靠运行时环境动态挑」的模块，PyInstaller 的 hook 覆盖不全 —— 单独钉住。
 # 加新项时写清「为什么静态分析看不到」。
