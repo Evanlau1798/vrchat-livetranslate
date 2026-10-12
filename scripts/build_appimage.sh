@@ -250,7 +250,7 @@ HIDDEN=(
     vlt.output.openxr_overlay          # Linux 手腕屏后端（由 vlt/platform/linux.py 收）
     vlt.platform vlt.platform.audio vlt.platform.base vlt.platform.linux
     vlt.platform.wayland vlt.platform.x11 vlt.platform.overlay_pixels   # 桌面字幕原生窗（layer-shell / ARGB）+ 共用像素工具
-    vlt.session vlt.session.base vlt.session.qwen38
+    vlt.session vlt.session.base vlt.session.qwen38 vlt.session.chatgpt_live
     # 第三方：按需导入 / 运行时加载（音频第三方只在 Windows 侧，见文件头「反向裁剪」）
     miniaudio _miniaudio pythonosc websockets yaml
     PIL PIL.Image PIL.ImageDraw PIL.ImageTk numpy xr
