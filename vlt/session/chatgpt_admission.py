@@ -9,6 +9,7 @@ from .chatgpt_output import allowed, current, scope
 class _Approved:
     gate: object
     segment: object
+    _audio_bytes: int = 0
 
     def __call__(self, direction=None):
         return self.gate.valid() and allowed(self.segment, direction)
@@ -67,6 +68,7 @@ class Admission:
             segment = current()
             if segment is None or not self.valid():
                 return
-            with scope(_Approved(self, segment)):
+            size = len(value) if isinstance(value, bytes) else 0
+            with scope(_Approved(self, segment, size)):
                 callback(value)
         return emit
