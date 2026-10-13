@@ -1,7 +1,5 @@
 """Execute the shipped AudioWorklet, including overflow recovery, in Node's VM."""
-import json
 import shutil
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -40,8 +38,8 @@ console.log('PCM seal/tail/ACK PASS');
     @unittest.skipUnless(shutil.which('node'), 'Node.js required for actual worklet execution')
     def test_consumption_ack_and_overflow_reset(self):
         script = r'''
-const assert = require('node:assert/strict'), vm = require('node:vm');
-const worklet = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+import assert from 'node:assert/strict'; import vm from 'node:vm';
+const worklet = JSON.parse(process.argv[1]);
 const types = {};
 class Processor {constructor(){this.messages=[];this.port={postMessage:m=>this.messages.push(m)};}}
 vm.runInNewContext(worklet, {AudioWorkletProcessor:Processor, sampleRate:24000,
@@ -60,8 +58,7 @@ assert.equal(p.count,0); assert.equal(p.blocks.length,0);
 console.log('Actual worklet reset and consumption acknowledgments PASS');
 '''
         source = PAGE.split('const worklet = `', 1)[1].split('`;', 1)[0]
-        result = subprocess.run([shutil.which('node'), '-e', script],
-                                input=json.dumps(source), text=True, capture_output=True, timeout=10)
+        result = run_node(script, source)
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
