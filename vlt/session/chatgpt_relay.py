@@ -121,6 +121,7 @@ class SubscriptionRelay:
             'Content-Type': 'multipart/form-data; boundary=' + boundary,
             'originator': 'Codex Desktop', 'User-Agent': 'Codex Desktop/26.429.30905'})
         text_state = 'unparsed'
+        failure_reason = 'asr-result'
         try:
             if not isinstance(raw, bytes) or len(raw) > 65536:
                 raise ValueError()
@@ -137,14 +138,16 @@ class SubscriptionRelay:
                     raise ValueError()
             elif set(value) != {'text'}:
                 raise ValueError()
-            if (not isinstance(value['text'], str)
-                    or not value['text'].strip() or len(value['text'].encode()) > 8192):
+            if not isinstance(value['text'], str) or len(value['text'].encode()) > 8192:
+                raise ValueError()
+            if not value['text'].strip():
+                failure_reason = 'asr-empty'
                 raise ValueError()
             return value['text']
         except Exception:
             print(f'[subscription-asr] rejected result: rate={rate} pcm_ms={len(pcm) * 500 // rate} '
                   f'text_state={text_state}', flush=True)
-            raise RuntimeError('asr-result') from None
+            raise RuntimeError(failure_reason) from None
 
     async def _request(self, operation, body, headers):
         if operation not in ('transcribe', 'responses', 'live'):

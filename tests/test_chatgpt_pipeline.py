@@ -70,6 +70,84 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.services.audio_asr.assert_not_called()
         self.services.validate_audio.assert_not_called()
 
+    async def test_same_language_preserves_source_and_still_checks_text_and_voice(self):
+        self.cfg.source_lang = self.cfg.target_lang = 'zh'
+        self.verdict['language'] = 'zh'
+        source = '那這個本地用戶認證，明天九點再處理。'
+        self.services.source_asr.return_value = source
+        self.services.translate.return_value = {'translation': '明天處理驗證。', 'language': 'zh'}
+        self.services.audio_asr.return_value = source
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertTrue(self.consume())
+        self.assertEqual(self.text[0].confirmed, source)
+        self.services.translate.assert_not_awaited()
+        self.services.validate_text.assert_awaited_once_with(source, source, 'zh')
+        self.services.synthesize.assert_awaited_once_with(source, 'zh')
+        self.services.validate_audio.assert_awaited_once_with(source, source, 'zh')
+
+    async def test_same_language_cannot_bypass_text_rejection(self):
+        self.cfg.source_lang = self.cfg.target_lang = 'zh'
+        self.verdict.update(language='zh', approved=False)
+        source = '保留原句。'
+        self.services.source_asr.return_value = source
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertFalse(self.consume())
+        self.assertEqual((self.text, self.audio), ([], []))
+        self.services.validate_text.assert_awaited_once_with(source, source, 'zh')
+        self.services.synthesize.assert_not_awaited()
+
+    async def test_empty_source_asr_is_counted_separately_and_never_published(self):
+        self.services.source_asr.side_effect = RuntimeError('asr-empty')
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertFalse(self.consume())
+        self.assertEqual((self.text, self.audio), ([], []))
+        self.assertEqual(self.reasons.call_args.args[-1], 'source-asr-empty')
+        self.services.translate.assert_not_awaited()
+        self.services.synthesize.assert_not_awaited()
+
+    async def test_empty_voice_asr_and_non_asr_errors_do_not_release_outputs(self):
+        self.services.audio_asr.side_effect = RuntimeError('asr-empty')
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertFalse(self.consume())
+        self.assertEqual(self.reasons.call_args.args[-1], 'audio-asr-empty')
+        self.assertEqual((self.text, self.audio), ([], []))
+        self.services.audio_asr.side_effect = None
+        self.services.translate.side_effect = RuntimeError('asr-empty')
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertFalse(self.consume())
+        self.assertEqual(self.reasons.call_args.args[-1], 'translation-failed')
+
+    async def test_same_language_converts_script_without_replacing_regional_terms(self):
+        self.cfg.source_lang = self.cfg.target_lang = 'zh'
+        self.cfg.output_audio = False
+        self.verdict['language'] = 'zh'
+        self.services.source_asr.return_value = '本地用户认证和软件。'
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertTrue(self.consume())
+        self.assertEqual(self.text[-1].confirmed, '本地用戶認證和軟件。')
+        self.assertEqual(self.text[-1].source, self.text[-1].confirmed)
+
+    async def test_glossary_and_unknown_source_language_keep_the_translation_stage(self):
+        self.cfg.output_audio = False
+        self.cfg.target_lang = 'zh'
+        self.verdict['language'] = 'zh'
+        self.services.translate.return_value = {'translation': '術語。', 'language': 'zh'}
+        for source_lang, vocabulary in (('zh', {'詞條': '術語'}), (None, {})):
+            with self.subTest(source_lang=source_lang):
+                self.cfg.source_lang = source_lang
+                self.cfg.hotwords = vocabulary
+                self.services.translate.reset_mock()
+                self.pipeline.submit('mine', bytes(320))
+                await self.settle()
+                self.assertTrue(self.consume())
+                self.services.translate.assert_awaited_once_with('明天九點見。', 'zh', vocabulary)
+
     async def test_real_relay_parsers_reject_then_recover_without_early_caption(self):
         from vlt.session.chatgpt_auth import Credentials
         from vlt.session.chatgpt_relay import SubscriptionRelay

@@ -76,10 +76,18 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
         self.owner.credentials.assert_not_called()
 
     async def test_malformed_extra_tool_and_oversized_results_fail_without_raw_error(self):
-        for raw in (b'{"text":""}', b'{"text":"ok","tool":{}}', b'{"text":"a","text":"b"}',
+        for raw in (b'{"text":"ok","tool":{}}', b'{"text":"a","text":"b"}',
                     b'not-json-private-secret', json.dumps({'text': 'x' * 8193}).encode()):
             with patch('vlt.session.chatgpt_relay.request', return_value=raw):
                 with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
+                    await self.asr.source_asr(b'\x00\x00', 'zh')
+
+    async def test_empty_transcript_is_distinct_from_a_protocol_error(self):
+        for raw, reason in ((b'{"text":""}', 'asr-empty'),
+                            (b'{"text":" \\n"}', 'asr-empty'),
+                            (b'{"text":"","tool":{}}', 'asr-result')):
+            with self.subTest(reason=reason), patch('vlt.session.chatgpt_relay.request', return_value=raw):
+                with self.assertRaisesRegex(RuntimeError, '^' + reason + '$'):
                     await self.asr.source_asr(b'\x00\x00', 'zh')
 
     async def test_failed_asr_notes_empty_text_and_duration_without_private_response(self):
@@ -88,7 +96,7 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
                            (b'private-invalid-json', 'unparsed')):
             with self.subTest(state=state), patch('vlt.session.chatgpt_relay.request', return_value=raw), \
                     patch('builtins.print') as note:
-                with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
+                with self.assertRaisesRegex(RuntimeError, '^' + ('asr-empty' if state == 'empty' else 'asr-result') + '$'):
                     await self.asr.source_asr(b'\x00\x00' * 8000, 'zh')
             self.assertEqual(note.call_count, 1)
             message = note.call_args.args[0]

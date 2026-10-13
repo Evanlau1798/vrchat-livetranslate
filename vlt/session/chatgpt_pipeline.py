@@ -179,7 +179,9 @@ class Coordinator:
             raise _Rejected(name + '-timeout') from None
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            if name in ('source-asr', 'audio-asr') and error.args == ('asr-empty',):
+                raise _Rejected(name + '-empty') from None
             raise _Rejected(name + '-failed') from None
         if timer.expired() or asyncio.get_running_loop().time() >= deadline:
             raise _Rejected(name + '-timeout')
@@ -192,8 +194,12 @@ class Coordinator:
         source = await self._stage(section, 'source-asr', self._services.source_asr, section.pcm, source_lang)
         if not _string(source):
             raise _Rejected('source-invalid')
-        translation = await self._stage(section, 'translation', self._services.translate,
-                                        source, target, json.loads(vocabulary))
+        terms = json.loads(vocabulary)
+        if source_lang == target and not terms:
+            translation = {'translation': source, 'language': target}
+        else:
+            translation = await self._stage(section, 'translation', self._services.translate,
+                                            source, target, terms)
         if (not isinstance(translation, dict) or set(translation) != {'translation', 'language'}
                 or translation['language'] != target or not _string(translation['translation'])):
             raise _Rejected('translation-invalid')
@@ -256,7 +262,7 @@ class Coordinator:
         source, text = approval.source, approval.translation
         if section.policy[0] == 'zh' or section.policy[1] == 'zh':
             from opencc import OpenCC
-            convert = OpenCC('s2twp').convert
+            convert = OpenCC('s2t' if section.policy[0] == section.policy[1] else 's2twp').convert
             source = convert(source) if section.policy[0] == 'zh' else source
             text = convert(text) if section.policy[1] == 'zh' else text
         if not self._valid(section):
