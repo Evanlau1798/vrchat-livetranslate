@@ -45,7 +45,20 @@ class SubscriptionRelay:
         return await self._transcribe(pcm, language, 16000, 30, SOURCE_LANGS.values())
 
     async def audio_asr(self, pcm, language):
-        return await self._transcribe(pcm, language, 24000, 90, TARGET_LANGS.values())
+        generation = self.owner.generation
+        transcripts = []
+        for _ in range(3):
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError()
+            if self.owner.generation != generation:
+                raise RuntimeError('asr-stale')
+            transcripts.append(await self._transcribe(pcm, language, 24000, 90, TARGET_LANGS.values()))
+            if self.owner.generation != generation:
+                raise RuntimeError('asr-stale')
+        for transcript in transcripts:
+            if transcripts.count(transcript) >= 2:
+                return transcript
+        raise RuntimeError('asr-uncertain')
 
     async def synthesize(self, text, target):
         from .chatgpt_voice import NativeVoice

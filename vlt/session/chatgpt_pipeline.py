@@ -180,6 +180,8 @@ class Coordinator:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            if name == 'audio-asr' and error.args == ('asr-uncertain',):
+                raise _Rejected('audio-asr-uncertain') from None
             if name in ('source-asr', 'audio-asr') and error.args == ('asr-empty',):
                 raise _Rejected(name + '-empty') from None
             raise _Rejected(name + '-failed') from None

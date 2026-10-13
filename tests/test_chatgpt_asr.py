@@ -29,18 +29,20 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
             pcm = b'\x12\x00' * 768
             with patch('vlt.session.chatgpt_relay.request', return_value=b'{"text":"\u539f\u6587"}') as call:
                 self.assertEqual(await operation(pcm, 'zh'), '原文')
-            name, body, headers = call.call_args.args
-            self.assertEqual(name, 'transcribe')
-            self.assertEqual(headers['Authorization'], 'Bearer fake-access')
-            self.assertEqual(headers['ChatGPT-Account-Id'], 'fake-account')
-            message = BytesParser(policy=policy.default).parsebytes(
-                ('Content-Type: ' + headers['Content-Type'] + '\r\n\r\n').encode() + body)
-            parts = list(message.iter_parts())
-            self.assertEqual([p.get_param('name', header='Content-Disposition') for p in parts], ['file', 'language'])
-            self.assertEqual(parts[1].get_payload(decode=True), b'zh')
-            with wave.open(io.BytesIO(parts[0].get_payload(decode=True)), 'rb') as audio:
-                self.assertEqual((audio.getframerate(), audio.getnchannels(), audio.getsampwidth()), (rate, 1, 2))
-                self.assertEqual(audio.readframes(audio.getnframes()), pcm)
+            self.assertEqual(call.call_count, 1 if rate == 16000 else 3)
+            for request_args in call.call_args_list:
+                name, body, headers = request_args.args
+                self.assertEqual(name, 'transcribe')
+                self.assertEqual(headers['Authorization'], 'Bearer fake-access')
+                self.assertEqual(headers['ChatGPT-Account-Id'], 'fake-account')
+                message = BytesParser(policy=policy.default).parsebytes(
+                    ('Content-Type: ' + headers['Content-Type'] + '\r\n\r\n').encode() + body)
+                parts = list(message.iter_parts())
+                self.assertEqual([p.get_param('name', header='Content-Disposition') for p in parts], ['file', 'language'])
+                self.assertEqual(parts[1].get_payload(decode=True), b'zh')
+                with wave.open(io.BytesIO(parts[0].get_payload(decode=True)), 'rb') as audio:
+                    self.assertEqual((audio.getframerate(), audio.getnchannels(), audio.getsampwidth()), (rate, 1, 2))
+                    self.assertEqual(audio.readframes(audio.getnframes()), pcm)
 
     async def test_automatic_source_language_is_omitted_and_no_transcript_hint_exists(self):
         with patch('vlt.session.chatgpt_relay.request', return_value=b'{"text":"text"}') as call:
@@ -51,6 +53,85 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b'expected', body)
         with self.assertRaises(TypeError):
             await self.asr.audio_asr(b'\x00\x00', 'ja', expected='answer')
+
+    async def test_blind_audio_uses_fixed_three_reads_and_exact_transcript_majority(self):
+        texts = ['本地用戶對象。', '本地用戶認證。', '本地用戶認證。']
+        with patch('vlt.session.chatgpt_relay.request',
+                   side_effect=[json.dumps({'text': text}).encode() for text in texts]) as call:
+            self.assertEqual(await self.asr.audio_asr(b'\x12\x00' * 768, 'zh'), texts[1])
+        self.assertEqual(call.call_count, 3)
+        for args in call.call_args_list:
+            self.assertNotIn(b'prompt', args.args[1])
+            self.assertNotIn(b'expected', args.args[1])
+
+    async def test_blind_audio_disagreement_does_not_merge_numbers_negation_or_script(self):
+        for texts in (['9', '09', '９'], ['不去', '去', '不要去'], ['幹', '乾', '干']):
+            with self.subTest(texts=texts), patch('vlt.session.chatgpt_relay.request',
+                    side_effect=[json.dumps({'text': text}).encode() for text in texts]) as call:
+                with self.assertRaisesRegex(RuntimeError, '^asr-uncertain$'):
+                    await self.asr.audio_asr(b'\x00\x00', 'zh')
+            self.assertEqual(call.call_count, 3)
+
+    async def test_blind_audio_malformed_third_result_cannot_release_an_early_majority(self):
+        with patch('vlt.session.chatgpt_relay.request', side_effect=[
+                b'{"text":"same"}', b'{"text":"same"}', b'{"text":"same","tool":{}}']) as call:
+            with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
+                await self.asr.audio_asr(b'\x00\x00', 'en')
+        self.assertEqual(call.call_count, 3)
+
+    async def test_blind_audio_generation_change_between_reads_prevents_the_next_upload(self):
+        async def switched(*args):
+            self.owner.generation += 1
+            return 'same'
+
+        with patch.object(self.asr, '_transcribe', side_effect=switched) as call:
+            with self.assertRaisesRegex(RuntimeError, '^asr-stale$'):
+                await self.asr.audio_asr(b'\x00\x00', 'en')
+        self.assertEqual(call.call_count, 1)
+
+    async def test_blind_audio_cancellation_between_reads_prevents_the_next_upload(self):
+        async def cancelled(*args):
+            asyncio.current_task().cancel()
+            return 'same'
+
+        with patch.object(self.asr, '_transcribe', side_effect=cancelled) as call:
+            task = asyncio.create_task(self.asr.audio_asr(b'\x00\x00', 'en'))
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(task.cancelled())
+        self.assertEqual(call.call_count, 1)
+
+    async def test_blind_audio_group_timeout_stops_before_the_third_read(self):
+        from vlt.session.base import SessionConfig
+        from vlt.session import chatgpt_pipeline as pipeline
+
+        cfg = SessionConfig(provider='chatgpt', source_lang='zh', target_lang='ja', output_audio=True)
+        coordinator = pipeline.Coordinator({'mine': cfg}, self.asr, Mock(), lambda: self.owner.generation)
+        pcm = b'\x00\x00'
+        section = pipeline._Section('mine', 'test', coordinator._epoch, self.owner.generation,
+                                    pipeline._policy(cfg), pcm, pipeline._hash(pcm))
+        cancelled = asyncio.Event()
+        calls = 0
+
+        async def slow_read(*args):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return 'same'
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        try:
+            with patch.object(self.asr, '_transcribe', side_effect=slow_read), \
+                 patch.object(pipeline, '_STAGE_TIMEOUT', .02):
+                with self.assertRaisesRegex(pipeline._Rejected, '^audio-asr-timeout$'):
+                    await coordinator._stage(section, 'audio-asr', self.asr.audio_asr, pcm, 'ja')
+            self.assertEqual(calls, 2)
+            self.assertTrue(cancelled.is_set())
+            self.assertFalse(coordinator.consume('mine', Mock(), Mock()))
+        finally:
+            await coordinator.close()
 
     async def test_asr_uses_production_fixed_transport_without_launching_an_agent(self):
         response = Mock(status=200, length=None, headers=Message(), will_close=True)

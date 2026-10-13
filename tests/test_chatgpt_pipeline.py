@@ -108,6 +108,15 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.services.translate.assert_not_awaited()
         self.services.synthesize.assert_not_awaited()
 
+    async def test_uncertain_audio_asr_is_rejected_before_audio_check_and_callbacks(self):
+        self.services.audio_asr.side_effect = RuntimeError('asr-uncertain')
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertFalse(self.consume())
+        self.assertEqual(self.reasons.call_args.args[-1], 'audio-asr-uncertain')
+        self.assertEqual((self.text, self.audio), ([], []))
+        self.services.validate_audio.assert_not_awaited()
+
     async def test_empty_voice_asr_and_non_asr_errors_do_not_release_outputs(self):
         self.services.audio_asr.side_effect = RuntimeError('asr-empty')
         self.pipeline.submit('mine', bytes(320))
