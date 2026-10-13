@@ -120,10 +120,14 @@ class SubscriptionRelay:
         raw = await self._request('transcribe', body, {
             'Content-Type': 'multipart/form-data; boundary=' + boundary,
             'originator': 'Codex Desktop', 'User-Agent': 'Codex Desktop/26.429.30905'})
+        text_state = 'unparsed'
         try:
             if not isinstance(raw, bytes) or len(raw) > 65536:
                 raise ValueError()
             value = bounded_json(raw)
+            text = value.get('text')
+            text_state = ('empty' if isinstance(text, str) and not text.strip()
+                          else 'nonempty' if isinstance(text, str) else 'nonstring')
             assets = {'asset_pointer', 'asset_ttl', 'asset_format'}
             if set(value) == {'text'} | assets:
                 if any(not isinstance(value[key], str) or not value[key]
@@ -138,6 +142,8 @@ class SubscriptionRelay:
                 raise ValueError()
             return value['text']
         except Exception:
+            print(f'[subscription-asr] rejected result: rate={rate} pcm_ms={len(pcm) * 500 // rate} '
+                  f'text_state={text_state}', flush=True)
             raise RuntimeError('asr-result') from None
 
     async def _request(self, operation, body, headers):

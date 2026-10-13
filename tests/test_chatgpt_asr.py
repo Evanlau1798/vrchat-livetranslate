@@ -82,6 +82,21 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
                     await self.asr.source_asr(b'\x00\x00', 'zh')
 
+    async def test_failed_asr_notes_empty_text_and_duration_without_private_response(self):
+        for raw, state in ((b'{"text":""}', 'empty'),
+                           (b'{"text":"private-speech","tool":"private-secret"}', 'nonempty'),
+                           (b'private-invalid-json', 'unparsed')):
+            with self.subTest(state=state), patch('vlt.session.chatgpt_relay.request', return_value=raw), \
+                    patch('builtins.print') as note:
+                with self.assertRaisesRegex(RuntimeError, '^asr-result$'):
+                    await self.asr.source_asr(b'\x00\x00' * 8000, 'zh')
+            self.assertEqual(note.call_count, 1)
+            message = note.call_args.args[0]
+            self.assertIn('pcm_ms=500', message)
+            self.assertIn('text_state=' + state, message)
+            self.assertNotIn('private', message)
+            self.assertNotIn('fake-access', message)
+
     async def test_bounded_asset_metadata_is_discarded_without_fetching(self):
         response = {'text': '明天九點見。', 'asset_pointer': 'sediment://test-only',
                     'asset_ttl': '2026-10-11T00:00:00Z', 'asset_format': 'wav'}

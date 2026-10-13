@@ -176,6 +176,7 @@ def request(operation, body, headers):
         transport.settimeout(_remaining(deadline))
         response = connection.getresponse()
         if response.status != (201 if operation == 'live' else 200):
+            print(f'[subscription-http] {operation}: rejected status={response.status}', flush=True)
             raise _HTTPFailure('http-rejected')
         if (response.headers.defects or response.headers.get_unixfrom() or response.headers.get_payload() or any(
                 _TRAILER.fullmatch((k + ':' + v + '\r\n').encode('latin-1')) is None

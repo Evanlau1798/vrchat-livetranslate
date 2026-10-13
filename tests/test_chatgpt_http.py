@@ -15,6 +15,17 @@ from vlt.session import chatgpt_http as http
 
 
 class HTTPTests(unittest.TestCase):
+    def test_rejected_status_is_logged_without_response_body_or_credentials(self):
+        response = Mock(status=429)
+        connection = Mock()
+        connection.getresponse.return_value = response
+        with patch('http.client.HTTPSConnection', return_value=connection), \
+                patch('threading.Timer'), patch('builtins.print') as note:
+            with self.assertRaisesRegex(RuntimeError, '^http-rejected$'):
+                request('transcribe', b'private-pcm', {'authorization': 'Bearer private-credential'})
+        note.assert_called_once_with('[subscription-http] transcribe: rejected status=429', flush=True)
+        response.read1.assert_not_called()
+
     def test_live_creation_returns_only_the_fixed_sideband_destination(self):
         for location in ('/v1/live/rtc_test', '/v1/realtime/calls/rtc_test',
                          '/v1/realtime/calls/calls/rtc_test',
