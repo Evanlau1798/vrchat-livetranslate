@@ -138,15 +138,48 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.cfg.target_lang = 'zh'
         self.verdict['language'] = 'zh'
         self.services.translate.return_value = {'translation': '術語。', 'language': 'zh'}
-        for source_lang, vocabulary in (('zh', {'詞條': '術語'}), (None, {})):
+        for source_lang, vocabulary, source in (('zh', {'詞條': '術語'}, '明天詞條九點見。'),
+                                                (None, {}, '明天九點見。')):
             with self.subTest(source_lang=source_lang):
                 self.cfg.source_lang = source_lang
                 self.cfg.hotwords = vocabulary
+                self.services.source_asr.return_value = source
                 self.services.translate.reset_mock()
                 self.pipeline.submit('mine', bytes(320))
                 await self.settle()
                 self.assertTrue(self.consume())
-                self.services.translate.assert_awaited_once_with('明天九點見。', 'zh', vocabulary)
+                self.services.translate.assert_awaited_once_with(source, 'zh', vocabulary)
+
+    async def test_unrelated_global_terms_do_not_rewrite_same_language(self):
+        self.cfg.source_lang = self.cfg.target_lang = 'zh'
+        self.cfg.hotwords = {'VRChat': 'VRChat', '逆袭': 'Nixi'}
+        self.cfg.output_audio = False
+        self.verdict['language'] = 'zh'
+        source = '那這個本地用戶認證，明天九點再處理。'
+        self.services.source_asr.return_value = source
+        self.services.translate.return_value = {'translation': '明天處理驗證。', 'language': 'zh'}
+        self.pipeline.submit('mine', bytes(320))
+        await self.settle()
+        self.assertTrue(self.consume())
+        self.assertEqual(self.text[-1].confirmed, source)
+        self.services.translate.assert_not_awaited()
+        self.services.validate_text.assert_awaited_once_with(source, source, 'zh')
+
+    async def test_related_terms_match_chinese_script_and_case(self):
+        self.cfg.source_lang = self.cfg.target_lang = 'zh'
+        self.cfg.output_audio = False
+        self.verdict['language'] = 'zh'
+        self.services.translate.return_value = {'translation': '術語。', 'language': 'zh'}
+        for source, terms in (('逆襲今天到了。', {'逆袭': 'Nixi'}),
+                              ('今天在vrchat測試。', {'VRChat': 'VRChat'})):
+            with self.subTest(source=source):
+                self.cfg.hotwords = terms
+                self.services.source_asr.return_value = source
+                self.services.translate.reset_mock()
+                self.pipeline.submit('mine', bytes(320))
+                await self.settle()
+                self.assertTrue(self.consume())
+                self.services.translate.assert_awaited_once_with(source, 'zh', terms)
 
     async def test_real_relay_parsers_reject_then_recover_without_early_caption(self):
         from vlt.session.chatgpt_auth import Credentials

@@ -195,7 +195,17 @@ class Coordinator:
         if not _string(source):
             raise _Rejected('source-invalid')
         terms = json.loads(vocabulary)
-        if source_lang == target and not terms:
+        use_terms = bool(terms)
+        if source_lang == target and terms:
+            term_source = source.casefold()
+            term_keys = [term.casefold() for term in terms]
+            if target == 'zh':
+                from opencc import OpenCC
+                convert = OpenCC('t2s').convert
+                term_source = convert(term_source)
+                term_keys = [convert(term) for term in term_keys]
+            use_terms = any(term in term_source for term in term_keys)
+        if source_lang == target and not use_terms:
             translation = {'translation': source, 'language': target}
         else:
             translation = await self._stage(section, 'translation', self._services.translate,
