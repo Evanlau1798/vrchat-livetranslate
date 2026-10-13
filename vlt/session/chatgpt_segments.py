@@ -32,6 +32,8 @@ class Segmenter:
         for start in range(0, complete, _FRAME_SAMPLES):
             frame = samples[start:start + _FRAME_SAMPLES]
             voiced = sum(value * value for value in frame) >= 220 ** 2 * _FRAME_SAMPLES
+            if self._section is None and not self._discarding:
+                self._onset_frames = self._onset_frames + 1 if voiced else 0
             for value in frame:
                 if self._discarding:
                     self._quiet = 0 if voiced else self._quiet + 1
@@ -39,7 +41,7 @@ class Segmenter:
                         self._reset_section()
                     continue
                 if self._section is None:
-                    if not voiced:
+                    if self._onset_frames < 3:
                         self._preroll.append(value)
                         continue
                     self._section = array('h', self._preroll)
@@ -72,3 +74,4 @@ class Segmenter:
         self._section = None
         self._quiet = 0
         self._discarding = False
+        self._onset_frames = 0
