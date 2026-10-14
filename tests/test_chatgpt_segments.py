@@ -20,6 +20,33 @@ def feed(segmenter, data):
 
 
 class SegmentsTests(unittest.TestCase):
+    def test_explicit_boundary_preserves_the_partial_frame_and_is_idempotent(self):
+        s = Segmenter()
+        data = pcm(800, 480) + pcm(0, 101)
+        self.assertEqual(feed(s, data), [])
+        sealed = s.finish()
+        self.assertEqual(sealed.reason, '')
+        self.assertTrue(sealed.pcm == data)
+        self.assertIsNone(s.finish())
+        next_data = pcm(900, 480) + pcm(0, 8000)
+        self.assertEqual(feed(s, next_data)[0].pcm, next_data)
+
+    def test_boundary_discards_unconfirmed_onsets_instead_of_creating_noise_sections(self):
+        for samples in (100, 160, 320, 420):
+            with self.subTest(samples=samples):
+                s = Segmenter()
+                feed(s, pcm(800, samples))
+                self.assertIsNone(s.finish())
+                self.assertEqual(feed(s, pcm(900, 160) + pcm(0, 8000)), [])
+
+    def test_boundary_cannot_release_a_size_rejection_and_allows_a_fresh_utterance(self):
+        s = Segmenter()
+        rejected = feed(s, pcm(500, 480001))
+        self.assertEqual([(r.pcm, r.reason) for r in rejected], [(b'', 'segment-size')])
+        self.assertIsNone(s.finish())
+        data = pcm(900, 480) + pcm(0, 8000)
+        self.assertEqual(feed(s, data)[0].pcm, data)
+
     def test_isolated_onset_bursts_do_not_create_asr_candidates(self):
         for frames in (1, 2):
             with self.subTest(frames=frames):

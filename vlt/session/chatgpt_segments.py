@@ -65,6 +65,19 @@ class Segmenter:
             results.append(PCMSection(b'', 'segment-size'))
         return results
 
+    def finish(self):
+        section = None
+        if self._section is not None and not self._discarding:
+            samples = self._section + self._pending
+            if len(samples) > 480000:
+                section = PCMSection(b'', 'segment-size')
+            else:
+                if sys.byteorder != 'little':
+                    samples.byteswap()
+                section = PCMSection(samples.tobytes())
+        self.reset()
+        return section
+
     def reset(self):
         self._pending = array('h')
         self._reset_section()

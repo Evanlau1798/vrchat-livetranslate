@@ -91,6 +91,22 @@ class Coordinator:
                 accepted += int(self.submit(direction, section.pcm))
         return accepted
 
+    def finish(self, direction):
+        if self._closed or direction not in self._configs:
+            return 0
+        try:
+            self._sync_context()
+            section = self._segmenters[direction].finish()
+        except Exception:
+            self._reason(direction, uuid.uuid4().hex, 'input-rejected')
+            return 0
+        if section is None:
+            return 0
+        if section.reason:
+            self._reason(direction, uuid.uuid4().hex, section.reason)
+            return 0
+        return int(self.submit(direction, section.pcm))
+
     def __init__(self, configs, services, on_reason, account_generation, context_valid=None):
         if not configs or any(k not in ('mine', 'theirs') for k in configs):
             raise ValueError('direction-invalid')

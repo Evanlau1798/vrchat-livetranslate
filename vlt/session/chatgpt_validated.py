@@ -76,6 +76,10 @@ class ChatGPTValidatedSession(LiveTranslateSession):
             raise RuntimeError('session-not-ready')
         self._pipeline.feed(self._direction, pcm16_16k)
 
+    def end_input_segment(self):
+        if self._usable():
+            self._pipeline.finish(self._direction)
+
     def tick(self):
         if not self._usable():
             return

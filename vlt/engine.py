@@ -435,6 +435,11 @@ class _SessionProxy:
         for chunk in chunks:
             await self._send_one(chunk)
 
+    def end_input_segment(self) -> None:
+        session = self._engine._session
+        if getattr(getattr(session, 'cfg', None), 'provider', None) == endpoints.PROVIDER_CHATGPT:
+            session.end_input_segment()
+
     def _note_voice(self) -> None:
         """把「这一块有人在说话」上报给**当前**会话（重连后自动落到新会话上）。
 
@@ -2001,6 +2006,7 @@ async def _send_gated(session, tele, label: str, pcm16: bytes,
     为什么要抽出来共用：#12 就是「同一件事在两条腿上各写一遍」写漏了一半 ——
     Linux 腿当初压根没接门限，界面说开了、实际不生效。口径只留这一处。
     """
+    was_open = gate is not None and gate.is_open
     out_chunks = ([pcm16] if gate is None else
                   gate.feed(pcm16, now=time.monotonic(),
                             dur_s=len(pcm16) / 2 / 16000.0))
@@ -2010,6 +2016,11 @@ async def _send_gated(session, tele, label: str, pcm16: bytes,
         sent += len(c)                    # 只算真正上送的（门限拦掉的不计）
         if tele is not None:
             tele.add(f"{label}_chunk", bytes=len(c))
+    if was_open and not gate.is_open:
+        # A wall-clock hold can deliver less than the segmenter's PCM silence budget.
+        finish = getattr(session, 'end_input_segment', None)
+        if callable(finish):
+            finish()
     return sent
 
 
