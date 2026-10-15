@@ -6,6 +6,7 @@ import secrets
 import tempfile
 
 from websockets.asyncio import client
+from websockets.exceptions import InvalidStatus, ConnectionClosed
 
 from ..ui_text import TARGET_LANGS
 from .chatgpt_browser_page import PAGE
@@ -121,12 +122,26 @@ class NativeVoice:
         connection.process_redirect = lambda error: error
         self.socket = await connection
 
+    def _diagnose(self, phase, error):
+        cause = str(error) if isinstance(error, RuntimeError) else ''
+        if cause not in {'voice-stale', 'voice-event', 'voice-input', 'voice-sdp', 'voice-transport',
+                         'capture-ack', 'capture-pcm', 'capture-size', 'capture-transport'}:
+            cause = ('timeout' if isinstance(error, TimeoutError) else
+                     'handshake' if isinstance(error, InvalidStatus) else
+                     'websocket' if isinstance(error, ConnectionClosed) else
+                     'os-error' if isinstance(error, OSError) else 'unexpected')
+        print(f'[subscription-voice] rejected: phase={phase} cause={cause} '
+              f'started={len(self.events.started)} done={len(self.events.done)} '
+              f'closed={len(self.events.closed)}', flush=True)
+
     async def generate(self, text, target):
         if not isinstance(text, str) or not text.strip() or len(text.encode()) > 8192 or target not in TARGET_LANGS.values():
             raise RuntimeError('voice-input')
-        location = []
+        phase = 'browser-start'
+        diagnosed = False
 
         async def offer(sdp):
+            nonlocal phase, diagnosed
             self._check()
             if not isinstance(sdp, str) or not sdp.startswith('v=0') or len(sdp.encode()) > 262144:
                 raise RuntimeError('voice-sdp')
@@ -140,10 +155,25 @@ class NativeVoice:
                 ensure_ascii=False).encode(), {'Content-Type': 'application/json',
                 'originator': 'codex_cli_rs', 'openai-alpha': 'quicksilver=v2'})
             self._check()
-            location.append(url)
             answer = bounded_json(answer)['sdp'] if answer.lstrip().startswith(b'{') else answer.decode()
             if not isinstance(answer, str) or not answer.startswith('v=0'):
                 raise RuntimeError('voice-sdp')
+            credentials = await self.owner.credentials()
+            if credentials.generation != self.generation:
+                raise RuntimeError('voice-stale')
+            # Subscribe before the peer can start speaking; late subscribers may miss session/turn events.
+            phase = 'sideband-connect'
+            self.connecting = asyncio.create_task(self._connect(url, credentials))
+            try:
+                await asyncio.shield(self.connecting)
+            except Exception as error:
+                # BrowserBridge converts callback errors; classify before that boundary discards the cause.
+                self._diagnose(phase, error)
+                diagnosed = True
+                raise
+            self._check()
+            self.reader = asyncio.create_task(self._read())
+            phase = 'browser-start'
             return answer
 
         try:
@@ -153,26 +183,26 @@ class NativeVoice:
                 self.bridge = _Bridge(offer, lambda _: self._fail(), self._receive)
                 await self.bridge.start(self.profile.name)
                 self._check()
-                credentials = await self.owner.credentials()
-                if credentials.generation != self.generation:
-                    raise RuntimeError('voice-stale')
-                self.connecting = asyncio.create_task(self._connect(location[-1], credentials))
-                await asyncio.shield(self.connecting)
-                self.reader = asyncio.create_task(self._read())
+                phase = 'turn-complete'
                 await self._wait(lambda: self.events.complete)
                 self.events.request_close()
+                phase = 'native-close'
                 await self.socket.send(json.dumps({'type': 'session.close', 'event_id': 'vlt_' + secrets.token_hex(8)}))
                 await self._wait(lambda: len(self.events.closed) == 2)
                 self.owned_close = True
+                phase = 'websocket-close'
                 await self.socket.close()
                 if getattr(self.socket.protocol.close_rcvd, 'code', None) != 1000:
                     raise RuntimeError('voice-transport')
+                phase = 'capture-seal'
                 pcm = await self.bridge.seal()
                 self._check()
                 result = (secrets.token_hex(16), pcm)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if not diagnosed:
+                self._diagnose(phase, exc)
             code = str(exc) if isinstance(exc, RuntimeError) and str(exc) in {
                 'voice-stale', 'voice-event', 'voice-input', 'voice-sdp', 'voice-transport'} else 'voice-failed'
             raise RuntimeError(code) from None
@@ -190,6 +220,7 @@ class NativeVoice:
                 cleanup.exception() if not cleanup.cancelled() else None
                 raise asyncio.CancelledError()
             if cleanup.exception() is not None:
+                self._diagnose('cleanup', cleanup.exception())
                 raise RuntimeError('voice-cleanup') from None
         self._check()
         return result

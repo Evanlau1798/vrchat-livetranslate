@@ -18,6 +18,30 @@ from chatgpt_voice_fakes import NativeFixture, PCM, TAIL, TEXT
 
 
 class VoiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sideband_is_connected_before_peer_can_start_a_short_turn(self):
+        start = self.fixture.start
+
+        async def short_turn(bridge, profile):
+            offer = bridge.on_offer
+
+            async def peer_answer(sdp):
+                answer = await offer(sdp)
+                if self.fixture.connect_args is None:
+                    # A late subscriber can receive live audio before its missed session.started.
+                    self.fixture.secondary.insert(0, dict(type='session.input_audio.append', audio='AAA='))
+                self.fixture.steps.append('peer-answer')
+                return answer
+
+            bridge.on_offer = peer_answer
+            await start(bridge, profile)
+
+        self.fixture.start = short_turn
+        accepted, _, audio = await self.run_section()
+        self.assertTrue(accepted, 'connecting before peer startup must retain the complete event sequence')
+        self.assertEqual(audio, [PCM + TAIL])
+        self.assertLess(self.fixture.steps.index('sideband-connect'), self.fixture.steps.index('peer-answer'))
+        self.assert_clean()
+
     async def test_transient_windows_sharing_lock_is_cleaned_before_output(self):
         cleanup = tempfile.TemporaryDirectory.cleanup
         attempts = []
