@@ -7,6 +7,7 @@ import tempfile
 
 from websockets.asyncio import client
 from websockets.exceptions import InvalidStatus, ConnectionClosed
+from websockets.frames import Frame, Opcode
 
 from ..ui_text import TARGET_LANGS
 from .chatgpt_browser_page import PAGE
@@ -59,6 +60,17 @@ class _Bridge(CandidateBridge):
             raise RuntimeError('voice-event')
         self.receive(event['data'], 'primary')
         return True
+
+
+class _NativeConnection(client.ClientConnection):
+    def process_event(self, event):
+        super().process_event(event)
+        if (isinstance(event, Frame) and event.opcode == Opcode.CLOSE
+                and getattr(self.protocol.close_rcvd, 'code', None) == 1000
+                and getattr(self.protocol.close_sent, 'code', None) == 1000
+                and getattr(self.protocol, 'close_rcvd_then_sent', None) is False):
+            # The native service can leave TCP idle after WS close; finish TLS after the reply is flushed.
+            self.transport.close()
 
 
 class NativeVoice:
@@ -117,7 +129,7 @@ class NativeVoice:
             'ChatGPT-Account-Id': credentials.account,
             'originator': 'codex_cli_rs', 'openai-alpha': 'quicksilver=v2'},
             ssl=tls_context(), proxy=None, open_timeout=15, close_timeout=2,
-            max_size=256000, max_queue=16, compression=None)
+            max_size=256000, max_queue=16, compression=None, create_connection=_NativeConnection)
         # 私有 Location 已由固定 HTTP adapter 校驗；WebSocket 也禁止 redirect。
         connection.process_redirect = lambda error: error
         self.socket = await connection
