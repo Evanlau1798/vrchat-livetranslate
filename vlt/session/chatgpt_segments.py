@@ -32,42 +32,43 @@ class Segmenter:
         for start in range(0, complete, _FRAME_SAMPLES):
             frame = samples[start:start + _FRAME_SAMPLES]
             voiced = sum(value * value for value in frame) >= 220 ** 2 * _FRAME_SAMPLES
-            if self._section is None and not self._discarding:
+            if self._section is None:
                 self._onset_frames = self._onset_frames + 1 if voiced else 0
-            for value in frame:
-                if self._discarding:
-                    self._quiet = 0 if voiced else self._quiet + 1
-                    if self._quiet >= 8000:
-                        self._reset_section()
+                if self._onset_frames < 3:
+                    self._preroll.extend(frame)
                     continue
-                if self._section is None:
-                    if self._onset_frames < 3:
-                        self._preroll.append(value)
-                        continue
-                    self._section = array('h', self._preroll)
-                    self._preroll.clear()
-                self._section.append(value)
-                self._quiet = 0 if voiced else self._quiet + 1
-                if len(self._section) > 480000:
-                    self._section = None
-                    self._discarding = True
-                    results.append(PCMSection(b'', 'segment-size'))
-                    if self._quiet >= 8000:
-                        self._reset_section()
-                elif self._quiet >= 8000:
-                    if sys.byteorder != 'little':
-                        self._section.byteswap()
-                    results.append(PCMSection(self._section.tobytes()))
-                    self._reset_section()
-        if self._section is not None and len(self._section) + len(self._pending) > 480000:
-            self._section = None
-            self._discarding = True
-            results.append(PCMSection(b'', 'segment-size'))
+                self._section = array('h', self._preroll)
+                self._preroll.clear()
+            self._section.extend(frame)
+            self._quiet = 0 if voiced else self._quiet + _FRAME_SAMPLES
+            if self._quiet >= 8000:
+                if sys.byteorder != 'little':
+                    self._section.byteswap()
+                results.append(PCMSection(self._section.tobytes()))
+                self._reset_section()
+            elif len(self._section) >= 480000:
+                # Keep every sample; prefer a quiet valley near the ASR input limit.
+                tail = self._section[-32000:]
+                energies = [sum(v * v for v in tail[i:i + _FRAME_SAMPLES])
+                            for i in range(0, len(tail), _FRAME_SAMPLES)]
+                energy = best = sum(energies[:20])
+                cut = len(self._section) - len(tail) + 1600
+                for i in range(1, len(energies) - 19):
+                    energy += energies[i + 19] - energies[i - 1]
+                    if energy <= best:
+                        best = energy
+                        cut = len(self._section) - len(tail) + (i + 10) * _FRAME_SAMPLES
+                if len(self._section) - cut <= self._quiet:
+                    cut = len(self._section) - self._quiet - _FRAME_SAMPLES
+                prefix, self._section = self._section[:cut], self._section[cut:]
+                if sys.byteorder != 'little':
+                    prefix.byteswap()
+                results.append(PCMSection(prefix.tobytes()))
         return results
 
     def finish(self):
         section = None
-        if self._section is not None and not self._discarding:
+        if self._section is not None:
             samples = self._section + self._pending
             if len(samples) > 480000:
                 section = PCMSection(b'', 'segment-size')
@@ -86,5 +87,4 @@ class Segmenter:
         self._preroll = deque(maxlen=16000)
         self._section = None
         self._quiet = 0
-        self._discarding = False
         self._onset_frames = 0

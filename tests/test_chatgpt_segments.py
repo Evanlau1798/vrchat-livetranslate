@@ -39,11 +39,13 @@ class SegmentsTests(unittest.TestCase):
                 self.assertIsNone(s.finish())
                 self.assertEqual(feed(s, pcm(900, 160) + pcm(0, 8000)), [])
 
-    def test_boundary_cannot_release_a_size_rejection_and_allows_a_fresh_utterance(self):
+    def test_boundary_seals_the_bounded_continuation_and_allows_a_fresh_utterance(self):
         s = Segmenter()
-        rejected = feed(s, pcm(500, 480001))
-        self.assertEqual([(r.pcm, r.reason) for r in rejected], [(b'', 'segment-size')])
-        self.assertIsNone(s.finish())
+        source = pcm(500, 480001)
+        sections = feed(s, source)
+        sections.append(s.finish())
+        self.assertTrue(all(not r.reason and len(r.pcm) <= 960000 for r in sections))
+        self.assertTrue(b''.join(r.pcm for r in sections) == source)
         data = pcm(900, 480) + pcm(0, 8000)
         self.assertEqual(feed(s, data)[0].pcm, data)
 
@@ -81,12 +83,14 @@ class SegmentsTests(unittest.TestCase):
         self.assertEqual(results[0].reason, '')
         self.assertTrue(results[0].pcm == speech + pause, 'sealed PCM must remain byte-identical')
 
-    def test_noise_does_not_prevent_recovery_after_a_real_size_rejection(self):
+    def test_noise_allows_the_bounded_continuation_to_close_without_losing_pcm(self):
         s = Segmenter()
-        rejected = feed(s, pcm(500, 480160))
-        self.assertEqual([r.reason for r in rejected], ['segment-size'])
+        source = pcm(500, 480160)
+        sections = feed(s, source)
         noise = (pcm(1000, 1) + pcm(0, 159)) * 50
-        self.assertEqual(feed(s, noise), [])
+        sections.extend(feed(s, noise))
+        self.assertTrue(all(not r.reason and len(r.pcm) <= 960000 for r in sections))
+        self.assertTrue(b''.join(r.pcm for r in sections) == source + noise)
         normal = feed(s, pcm(800, 480) + pcm(0, 8000))
         self.assertEqual(len(normal), 1)
         self.assertEqual(normal[0].reason, '')
@@ -125,16 +129,18 @@ class SegmentsTests(unittest.TestCase):
         self.assertEqual(len(results), 2, 'two actual utterances must remain separate')
         self.assertTrue(results[1].pcm == pcm(600, 480) + pcm(0, 8000))
 
-    def test_limit_rejects_whole_section_until_next_silence(self):
+    def test_limit_preserves_the_continuation_without_waiting_for_silence(self):
         s = Segmenter()
-        results = feed(s, pcm(500, 480001))
-        self.assertEqual([(r.pcm, r.reason) for r in results], [(b'', 'segment-size')])
-        self.assertEqual(feed(s, pcm(500, 16000) + pcm(0, 7999)), [])
-        s.feed(pcm(0, 1))
+        source = pcm(500, 496000)
+        results = feed(s, source)
+        self.assertTrue(results and results[0].pcm, 'the input limit must end a bounded candidate')
+        results.extend(feed(s, pcm(0, 8000)))
+        self.assertTrue(all(not r.reason and len(r.pcm) <= 960000 for r in results))
+        self.assertTrue(b''.join(r.pcm for r in results) == source + pcm(0, 8000))
         recovered = feed(s, pcm(700, 480) + pcm(0, 8000))
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0].reason, '')
-        self.assertNotIn(pcm(500, 1), recovered[0].pcm)
+        self.assertTrue(recovered[0].pcm == pcm(700, 480) + pcm(0, 8000))
 
     def test_reset_discards_partial_section(self):
         for samples in (100, 320, 480):
@@ -147,13 +153,15 @@ class SegmentsTests(unittest.TestCase):
                 self.assertTrue(results[0].pcm == pcm(900, 480) + pcm(0, 8000),
                                 'reset must remove both pending and active PCM')
 
-    def test_size_limit_at_silence_boundary_does_not_discard_the_next_utterance(self):
+    def test_size_limit_at_silence_boundary_preserves_both_utterances(self):
         s = Segmenter()
-        rejected = feed(s, pcm(500, 472160) + pcm(0, 8000))
-        self.assertEqual([(r.pcm, r.reason) for r in rejected], [(b'', 'segment-size')])
-        normal = feed(s, pcm(700, 480) + pcm(0, 8000))
-        self.assertEqual(len(normal), 1, 'completed rejection boundary must allow the next full utterance')
-        self.assertTrue(normal[0].pcm == pcm(700, 480) + pcm(0, 8000))
+        first = pcm(500, 472160) + pcm(0, 8000)
+        next_data = pcm(700, 480) + pcm(0, 8000)
+        sections = feed(s, first)
+        sections.extend(feed(s, next_data))
+        self.assertEqual(len(sections), 3)
+        self.assertTrue(all(not r.reason and len(r.pcm) <= 960000 for r in sections))
+        self.assertTrue(b''.join(r.pcm for r in sections) == first + next_data)
 
     def test_bad_pcm_is_rejected_without_retaining_partial_speech(self):
         for samples in (100, 320, 480):
