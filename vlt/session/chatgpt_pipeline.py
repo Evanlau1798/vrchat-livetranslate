@@ -79,7 +79,8 @@ class Coordinator:
             return 0
         try:
             self._sync_context()
-            sections = self._segmenters[direction].feed(pcm)
+            sections = self._segmenters[direction].feed(
+                pcm, allow_pause=direction not in self._active and not self._ready[direction])
         except Exception:
             self._reason(direction, uuid.uuid4().hex, 'input-rejected')
             return 0

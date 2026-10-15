@@ -17,7 +17,9 @@ class Segmenter:
     def __init__(self):
         self.reset()
 
-    def feed(self, pcm):
+    def feed(self, pcm, *, allow_pause=True):
+        if not allow_pause:
+            self._pause_cut = None
         if not isinstance(pcm, bytes) or len(pcm) % 2 or len(pcm) > 32000:
             self.reset()
             raise RuntimeError('pcm-invalid')
@@ -32,13 +34,15 @@ class Segmenter:
         for start in range(0, complete, _FRAME_SAMPLES):
             frame = samples[start:start + _FRAME_SAMPLES]
             voiced = sum(value * value for value in frame) >= 220 ** 2 * _FRAME_SAMPLES
+            self._onset_frames = self._onset_frames + 1 if voiced else 0
             if self._section is None:
-                self._onset_frames = self._onset_frames + 1 if voiced else 0
                 if self._onset_frames < 3:
                     self._preroll.extend(frame)
                     continue
                 self._section = array('h', self._preroll)
                 self._preroll.clear()
+            if allow_pause and voiced and self._quiet >= 5600 and len(self._section) >= 96000:
+                self._pause_cut = len(self._section)
             self._section.extend(frame)
             self._quiet = 0 if voiced else self._quiet + _FRAME_SAMPLES
             if self._quiet >= 8000:
@@ -46,6 +50,13 @@ class Segmenter:
                     self._section.byteswap()
                 results.append(PCMSection(self._section.tobytes()))
                 self._reset_section()
+            elif self._pause_cut is not None and self._onset_frames >= 3:
+                # Confirm the next onset, then separate at the completed 350 ms pause.
+                prefix, self._section = self._section[:self._pause_cut], self._section[self._pause_cut:]
+                self._pause_cut = None
+                if sys.byteorder != 'little':
+                    prefix.byteswap()
+                results.append(PCMSection(prefix.tobytes()))
             elif len(self._section) >= 480000:
                 # Keep every sample; prefer a quiet valley near the ASR input limit.
                 tail = self._section[-32000:]
@@ -61,6 +72,7 @@ class Segmenter:
                 if len(self._section) - cut <= self._quiet:
                     cut = len(self._section) - self._quiet - _FRAME_SAMPLES
                 prefix, self._section = self._section[:cut], self._section[cut:]
+                self._pause_cut = None
                 if sys.byteorder != 'little':
                     prefix.byteswap()
                 results.append(PCMSection(prefix.tobytes()))
@@ -88,3 +100,4 @@ class Segmenter:
         self._section = None
         self._quiet = 0
         self._onset_frames = 0
+        self._pause_cut = None

@@ -113,6 +113,15 @@ class ContinuousSegmentsTests(unittest.TestCase):
 
 class ContinuousPipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_both_directions_keep_full_source_and_wait_for_required_checks(self):
+        data = struct.pack('<h', 800) * 976000 + bytes(16000)
+        await self.check_both_directions(data, 3)
+
+    async def test_both_directions_validate_earlier_pause_sections_in_order(self):
+        data = (struct.pack('<h', 800) * 96000 + bytes(11200) +
+                struct.pack('<h', 900) * 16000 + bytes(16000))
+        await self.check_both_directions(data, 2)
+
+    async def check_both_directions(self, data, expected):
         for direction in ('mine', 'theirs'):
             with self.subTest(direction=direction):
                 verdict = dict(approved=True, language='ja', meaning=True, numbers=True,
@@ -132,7 +141,6 @@ class ContinuousPipelineTests(unittest.IsolatedAsyncioTestCase):
                                     output_audio=direction == 'mine')
                 reasons, texts, audio = Mock(), [], []
                 pipeline = Coordinator({direction: cfg}, services, reasons, lambda: 1)
-                data = struct.pack('<h', 800) * 976000 + bytes(16000)
                 try:
                     for at in range(0, len(data), 3200):
                         pipeline.feed(direction, data[at:at + 3200])
@@ -144,15 +152,15 @@ class ContinuousPipelineTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.sleep(0)
                         pipeline.consume(direction, texts.append, audio.append)
                     uploaded = [call.args[0] for call in services.source_asr.await_args_list]
-                    self.assertEqual(len(uploaded), 3)
+                    self.assertEqual(len(uploaded), expected)
                     self.assertTrue(all(0 < len(pcm) <= 960000 for pcm in uploaded))
                     self.assertTrue(b''.join(uploaded) == data)
-                    self.assertEqual(len(texts), 3)
-                    self.assertEqual(services.validate_text.await_count, 3)
+                    self.assertEqual(len(texts), expected)
+                    self.assertEqual(services.validate_text.await_count, expected)
                     if direction == 'mine':
-                        self.assertEqual(audio, [bytes(960)] * 3)
-                        self.assertEqual(services.audio_asr.await_count, 3)
-                        self.assertEqual(services.validate_audio.await_count, 3)
+                        self.assertEqual(audio, [bytes(960)] * expected)
+                        self.assertEqual(services.audio_asr.await_count, expected)
+                        self.assertEqual(services.validate_audio.await_count, expected)
                     else:
                         self.assertEqual(audio, [])
                         services.synthesize.assert_not_awaited()
