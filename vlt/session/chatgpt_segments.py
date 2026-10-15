@@ -41,7 +41,7 @@ class Segmenter:
                     continue
                 self._section = array('h', self._preroll)
                 self._preroll.clear()
-            if allow_pause and voiced and self._quiet >= 5600 and len(self._section) >= 96000:
+            if allow_pause and voiced and self._quiet >= 5600 and len(self._section) >= 64000:
                 self._pause_cut = len(self._section)
             self._section.extend(frame)
             self._quiet = 0 if voiced else self._quiet + _FRAME_SAMPLES

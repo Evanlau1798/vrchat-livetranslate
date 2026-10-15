@@ -23,6 +23,25 @@ def feed(segmenter, data, chunk=3200):
 
 
 class PauseSegmentsTests(unittest.TestCase):
+    def test_four_second_section_can_close_at_an_existing_confirmed_pause(self):
+        for samples in (58400, 64000, 80000):
+            with self.subTest(samples=samples):
+                s = Segmenter()
+                first = pcm(800, samples) + pcm(100, 5600)
+                self.assertEqual(feed(s, first + pcm(900, 320)), [])
+                rows = feed(s, pcm(900, 160))
+                self.assertEqual(len(rows), 1, 'a completed 4 s section need not wait until 6 s')
+                self.assertTrue(rows[0].pcm == first)
+                self.assertTrue(s.finish().pcm == pcm(900, 480))
+
+    def test_capture_stall_length_pause_stays_with_the_resumed_speech(self):
+        data = pcm(800, 96000) + pcm(100, 4800) + pcm(900, 16000) + pcm(0, 8000)
+        for chunk in (258, 3200, 31998, 32000):
+            with self.subTest(chunk=chunk):
+                rows = feed(Segmenter(), data, chunk)
+                self.assertEqual(len(rows), 1, '300 ms capture gap is not an early boundary')
+                self.assertTrue(rows[0].pcm == data)
+
     def test_long_speech_closes_at_pause_after_next_onset_is_confirmed(self):
         for quiet in (5600, 7840):
             with self.subTest(quiet=quiet):
@@ -39,7 +58,7 @@ class PauseSegmentsTests(unittest.TestCase):
                 self.assertIsNone(s.finish())
 
     def test_short_pause_short_utterance_and_unconfirmed_restart_stay_together(self):
-        for samples, quiet, resumed in ((96000, 5440, 480), (80000, 5600, 480),
+        for samples, quiet, resumed in ((96000, 5440, 480), (58240, 5600, 480),
                                         (96000, 5600, 320)):
             with self.subTest(samples=samples, quiet=quiet, resumed=resumed):
                 s = Segmenter()
@@ -132,7 +151,7 @@ class PauseBackpressureTests(unittest.IsolatedAsyncioTestCase):
                         for _ in range(ready_count):
                             self.assertTrue(pipeline.submit(direction, seed))
                             await idle()
-                        data = pcm(900, 96000) + pcm(100, 5600) + pcm(1000, 480)
+                        data = pcm(900, 64000) + pcm(100, 5600) + pcm(1000, 480)
                         for at in range(0, len(data), 3200):
                             pipeline.feed(direction, data[at:at + 3200])
                         await idle()
@@ -162,7 +181,7 @@ class PauseBackpressureTests(unittest.IsolatedAsyncioTestCase):
         try:
             pipeline.submit('mine', pcm(800, 480))
             await asyncio.wait_for(started.wait(), 1)
-            first = pcm(900, 96000) + pcm(100, 5600)
+            first = pcm(900, 64000) + pcm(100, 5600)
             data = first + pcm(1000, 480)
             accepted = sum(pipeline.feed('theirs', data[at:at + 3200])
                            for at in range(0, len(data), 3200))
@@ -190,7 +209,7 @@ class PauseBackpressureTests(unittest.IsolatedAsyncioTestCase):
                     first = pcm(800, 480) + pcm(0, 8000)
                     pipeline.feed(direction, first)
                     await asyncio.wait_for(started.wait(), 1)
-                    second = pcm(900, 96000) + pcm(100, 5600) + pcm(1000, 480)
+                    second = pcm(900, 64000) + pcm(100, 5600) + pcm(1000, 480)
                     for at in range(0, len(second), 3200):
                         pipeline.feed(direction, second[at:at + 3200])
                     self.assertEqual(len(pipeline._pending[direction]), 0,

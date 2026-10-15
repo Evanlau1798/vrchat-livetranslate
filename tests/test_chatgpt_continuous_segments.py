@@ -117,7 +117,7 @@ class ContinuousPipelineTests(unittest.IsolatedAsyncioTestCase):
         await self.check_both_directions(data, 3)
 
     async def test_both_directions_validate_earlier_pause_sections_in_order(self):
-        data = (struct.pack('<h', 800) * 96000 + bytes(11200) +
+        data = (struct.pack('<h', 800) * 64000 + bytes(11200) +
                 struct.pack('<h', 900) * 16000 + bytes(16000))
         await self.check_both_directions(data, 2)
 
