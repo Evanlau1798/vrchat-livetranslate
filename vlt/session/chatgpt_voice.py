@@ -209,6 +209,10 @@ class NativeVoice:
                 phase = 'capture-seal'
                 pcm = await self.bridge.seal()
                 self._check()
+                # Remove only excess digital-zero lead after full seal; keep 200 ms and every nonzero sample.
+                leading = (len(pcm) - len(pcm.lstrip(b'\0'))) // 2
+                if leading < len(pcm) // 2:
+                    pcm = pcm[max(0, leading - 4800) * 2:]
                 result = (secrets.token_hex(16), pcm)
         except asyncio.CancelledError:
             raise
