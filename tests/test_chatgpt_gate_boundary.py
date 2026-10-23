@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_chatgpt_validated as validated
-from vlt.engine import _LevelGate, _SessionProxy, _send_gated
+from vlt.engine import _LevelGate, _SilenceGate, _SessionProxy, _send_gated, _pump_capture
+from vlt.platform import win
+from vlt import engine as engine_module
 
 
 class GateBoundaryTests(unittest.IsolatedAsyncioTestCase):
@@ -150,14 +152,76 @@ class GateBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.services.source_asr.assert_not_awaited()
         self.assertEqual((self.text, self.audio), ([], []))
 
-    async def test_other_provider_keeps_its_exact_existing_audio_stream(self):
+    async def test_other_provider_keeps_upstream_silence_tail_without_explicit_boundary(self):
         other = SimpleNamespace(cfg=SimpleNamespace(provider='bailian'), send_audio=AsyncMock(),
                                 note_voice=Mock(), end_input_segment=Mock())
         _, proxy = self.proxy(other)
         speech, quiet = struct.pack('<h', 1000) * 1600, bytes(3200)
         await self.capture(proxy, _LevelGate(True, -45, 500, 250), [speech] * 3 + [quiet] * 20)
-        self.assertEqual(b''.join(call.args[0] for call in other.send_audio.await_args_list), speech * 3 + quiet * 4)
+        self.assertEqual(b''.join(call.args[0] for call in other.send_audio.await_args_list), speech * 3 + quiet * 10)
         other.end_input_segment.assert_not_called()
+
+    async def test_capture_source_loss_seals_each_recorded_prefix_before_recovery(self):
+        session = self.session('theirs', audio=False)
+        await session.start(self.on_text)
+        _, proxy = self.proxy(session)
+        for level in (1000,2000):
+            raw = struct.pack('<h',level) * 4800
+            source = SimpleNamespace(rate=16000,channels=1,finished=False,close=Mock())
+            async def read(**kwargs):
+                source.finished = True
+                return raw
+            source.read = read
+            await _pump_capture(proxy,None,0,None,'loopback',lambda:source,
+                                keep_alive=lambda:not source.finished)
+            await self.settle()
+            self.assertEqual(self.services.source_asr.await_count, 1 if level==1000 else 2)
+            self.assertEqual(self.services.source_asr.await_args.args[0],raw)
+            source.close.assert_called_once()
+
+    async def test_real_source_recovery_discards_both_gates_old_preroll(self):
+        for gate_kind,consumer in (('level','queue'),('silence','queue'),('level','linux'),('silence','linux')):
+            with self.subTest(gate_kind=gate_kind,consumer=consumer):
+                self.services.source_asr.reset_mock()
+                session = self.session('theirs',audio=False)
+                await session.start(self.on_text)
+                _, proxy = self.proxy(session)
+                gate = _LevelGate(gate_kind=='level',-45,500,250)
+                if gate_kind=='silence':
+                    proxy._gate = _SilenceGate(True,0,.25)
+                clock = iter((0,1,3))
+                send = _send_gated
+                async def timed_send(*args):
+                    with patch('vlt.engine.time.monotonic',return_value=next(clock)):
+                        return await send(*args)
+                for level in (1000,2000):
+                    speech = struct.pack('<h',level) * 28800
+                    blocks = [speech] + ([struct.pack('<h',100)*9600] if level==1000 else [])
+                    source = win.ProcessLoopbackSource(asyncio.get_running_loop(),pid=123)
+                    def pump(stop):
+                        for raw in blocks:
+                            source._emit(raw)
+                        raise RuntimeError('fake source boundary')
+                    source._pump = pump
+                    source._run()
+                    await asyncio.sleep(0)
+                    with patch('vlt.engine._send_gated',side_effect=timed_send):
+                        if consumer=='queue':
+                            await _pump_capture(proxy,None,0,None,'loopback',lambda:source,gate=gate,
+                                                keep_alive=lambda:not source.finished)
+                        else:
+                            target = engine_module.LoopbackTarget(id='9',name='fake',sample_rate=48000,channels=2)
+                            routes = [[target],[]] if level==1000 else [[]]
+                            with patch.object(engine_module.platform,'capture_backend',return_value=SimpleNamespace(
+                                    open_loopback=lambda *a,**k:source)), \
+                                 patch.object(engine_module,'VRCHAT_RECHECK_S',0), \
+                                 patch.object(engine_module,'pick_vrchat_targets',side_effect=routes):
+                                await engine_module._pump_vrchat_capture(proxy,None,None,[target],gate=gate)
+                    await self.settle()
+                    self.assertEqual(self.services.source_asr.await_count,1 if level==1000 else 2)
+                    expected = struct.pack('<h',level) * 4800
+                    self.assertEqual(self.services.source_asr.await_args.args[0],expected)
+                    self.assertTrue(source._closed)
 
 
 if __name__ == '__main__':

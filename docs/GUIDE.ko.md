@@ -16,6 +16,12 @@
 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)** 에서
 **`VRChatLiveTranslate.exe`** 를 받아(**단일 파일, 설치 불필요, 콘솔 창 없음**) 두 번 클릭하면 됩니다.
 
+> 🌏 **GitHub에 접속할 수 없을 때**(중국 본토 네트워크에서 흔합니다)는 아래 직링크를 사용하세요.
+> 이 프로젝트 자체 CDN이 배포하므로 GitHub 접속이 필요 없습니다:
+> - Windows: <https://dl.kcm-nixi.cn/VRChatLiveTranslate.exe>
+> - Linux: <https://dl.kcm-nixi.cn/VRChatLiveTranslate-x86_64.AppImage>
+> - 체크섬: <https://dl.kcm-nixi.cn/SHA256SUMS.txt> (exe 와 AppImage 각각 한 줄)
+
 - **Qwen Cloud API key** 는 직접 준비하셔야 합니다. "⚙ 설정"에서 붙여넣고 저장하세요
 - 설정과 로그는 `%APPDATA%\vrchat-livetranslate` 에 저장됩니다(읽기 전용 폴더에 exe를 둬도 동작합니다)
 - 포터블로 쓰고 싶다면(설정이 exe 옆에 저장됨) exe 옆에 **빈 `portable.txt`** 를 두세요
@@ -32,6 +38,11 @@
   - **다음에** → 이번 실행에서는 더 이상 알리지 않고, 다음 실행 때 다시 확인합니다
   - **이 버전은 알리지 않기** → 해당 버전만 무시하고, 다음 버전은 다시 알려 줍니다
 - 다운로드 실패 시 다시 시도할 수 있고, 창 안의 "다운로드 페이지 열기"로 Releases에서 직접 받아도 됩니다
+- **업데이트를 어디서 받나**: 새 버전 확인과 다운로드는 모두 이 프로젝트 자체 CDN(`dl.kcm-nixi.cn`,
+  Cloudflare R2)을 거치므로 **GitHub에 접속할 필요가 없습니다** —— 중국 본토 네트워크에서도 업데이트를
+  받을 수 있는 이유입니다. 이 주 경로를 쓸 수 없으면 자동으로 GitHub Releases로 넘어갑니다
+  (둘 다 안 될 때만 "확인 실패"가 표시됩니다). 다운로드가 중간에 끊기면 자동으로 다른 경로에서
+  한 번만 다시 시도합니다
 - 팝업이 없을 때 확인하고 싶다면 → "⚙ 설정 → 소프트웨어 업데이트 → 업데이트 확인"
 - 업데이트로 **설정과 API key가 사라지지 않습니다**. 업데이트 후 다음 실행 때 알려 드립니다
 
@@ -561,6 +572,8 @@ output:
 | 말풍선에 아무것도 안 나옴 | VRChat 미실행 / OSC 꺼짐 / 말풍선 표시가 Off. `--dry-run` 에서 전송 로그가 보이면 프로그램 쪽은 정상입니다 |
 | `[loopback] ❌ no loopback device found` | VRChat이 소리를 재생하지 않거나, **원격 데스크톱 세션에서 실행 중**입니다(WASAPI 엔드포인트는 세션마다 분리되므로 물리 머신의 현재 세션에서 실행해야 합니다) |
 | 마이크가 아무것도 못 잡음 | 위와 같습니다. 먼저 "⚙ 설정" 드롭다운에서 선택된 장치를 확인하세요(원격 세션에서 열거가 비는 것은 정상이라고 상태 표시줄에 안내됩니다). 로그에서 `[mic]` 검색: 「已回落到同名设备」가 보이면 이 사운드카드의 WASAPI 엔드포인트를 열 수 없어 프로그램이 같은 이름의 다른 인터페이스로 자동 전환한 정상 동작입니다. 「所有候选设备都打不开」면 실제 고장입니다 |
+| 상대방 음성에 음악/브라우저/시스템 소리가 섞임 | 엔드포인트 모드의 정상 동작입니다(출력 엔드포인트 전체 믹스를 캡처). 설정 → 오디오 → **캡처 방식** → "VRChat만 (프로세스)"를 선택하면 게임 소리만 캡처합니다(Win10 21H2+). VRChat이 실행 중이 아니면 대기하며 이는 정상입니다. "엔드포인트 믹스"로 되돌리면 기존 동작입니다(다음 번역 시작부터 적용) |
+| 내 번역 음성을 듣고 싶음(사이드톤) | **메인 화면 "출력" 줄에서 "사이드톤"을 체크**하세요(스위치는 여기). 볼륨과 "사이드톤 출력"(헤드폰 권장)은 설정 → 오디오에 있습니다. VRChat 오디오와 같은 장치면 번역 시작 시 캡처가 자동으로 "VRChat만 (프로세스)"로 전환되어 내 번역 음성이 다시 번역되지 않습니다. 지원되지 않는 환경에서는 사이드톤이 자동으로 꺼지고 안내됩니다 |
 | `Voice 'Chelsie' is not supported` | `session.voice` 가 비어 있습니다. `Tina` 로 두세요 |
 | `Invalid translation parameter` | `session.update` 에 `translation` 필드가 없습니다(코드에서 보장됨. 수정할 때 주의) |
 | `1007 Requests rate limit exceeded` | RPM 10에 도달했습니다. 1분 기다리세요. 자주 재시작하지 마세요(**WS 연결 1회마다 요청 1회**로 계산됩니다) |
@@ -606,7 +619,7 @@ vlt/
 server/                   여러 명 룸의 서버(Cloudflare Worker + Durable Object, 독립 배포)
 scripts/                  탐침·디버그 도구(probe_* / osc_listen / verify_release / room_e2e_local)
                           + run_tests.py(테스트 실행기) + verify/(실기 검수 스크립트. 실제 데스크톱/하드웨어 필요, CI에서는 실행되지 않음)
-tests/                    95개 파일, 718개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
+tests/                    101개 파일, 785개 테스트 함수(오프라인 실행 가능, CI는 파일 단위로
                           실행하며, 실제 API 키가 필요한 tests/test_engine.py 는 제외합니다)
 docs/                     P0.5 / P1 / P2 실측 결과(프로토콜, 지연, 손목 오버레이)
 testdata/                 내장 테스트 오디오(중국어 8.56초, 영어 7.92초, 16kHz 모노 PCM)
@@ -667,12 +680,13 @@ build_exe.bat                                              :: 빌드 + 이후 �
   구문 검사 → **정적 검사(ruff 의 `F,E9` 등급, 차단)** → 자격 증명 스캔 → 오프라인 테스트 전체 파일 단위 실행(덤으로 커버리지를 누적해 끝에 요약을 출력, 임계값 없음·차단 없음) → 이어서 별도의 **패키징 파이프라인** 검사(산출물 존재 및 20MB 이상)
 - **릴리스**(`.github/workflows/release.yml`, `v*` 태그 푸시로 시작):
   먼저 태그와 `vlt/__init__.py` 의 `__version__` 을 대조(불일치면 즉시 실패) → **exe 와 Linux AppImage** 패키징 →
-  **exe**, **`VRChatLiveTranslate-x86_64.AppImage`**, `SHA256SUMS.txt` 세 가지를 첨부한 Release 생성(체크섬은 GitHub가 첨부 파일 옆에 `sha256:…` 로 표시합니다. 이 파일은 **v0.2.0 이하 클라이언트**를 위한 과도기 조치로, 이 클라이언트들은 이 첨부만 인식하므로 없으면 조용히 업데이트를 찾지 못합니다)
+  **Cloudflare R2 에 덮어쓰기 공개**(`dl.kcm-nixi.cn`: 클라이언트가 "업데이트 확인 / 지금 업데이트"에 쓰는 주 경로. 업로드 후 공개 도메인으로 두 산출물을 통째로 다시 받아 바이트 단위로 대조하며, 불일치면 전체를 실패로 처리하고 Release 를 만들지 않습니다) →
+  **exe**, **`VRChatLiveTranslate-x86_64.AppImage`**, `SHA256SUMS.txt` 세 가지를 첨부한 Release 생성(체크섬은 GitHub가 첨부 파일 옆에 `sha256:…` 로 표시합니다. 이 파일은 **사용자가 다운로드를 검증하기 위한** 것이며 exe 와 AppImage 각각 한 줄을 담습니다(발행 스크립트가 실물과 대조해 일치하지 않으면 릴리스되지 않습니다))
 - **받은 파일을 직접 검증하고 싶다면**: `scripts/verify_release.py` 가 Release 산출물을 받아 대조합니다
   (SHA256, `--self-test` 실제 실행, 버전 줄, 신규 기능 문자열을 바이트코드에서 검색, 아이콘 픽셀 비교):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.11.2 "_maybe_apply_anchor,CTX_FLUSH,_write_proxy_leaves,_yaml_set_or_create_checked"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
   ```
 
 ---

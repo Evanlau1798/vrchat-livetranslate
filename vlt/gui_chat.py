@@ -43,7 +43,6 @@ from .ui_theme import (
 from . import ui_tk
 from .ui_tk import _char_width_for, round_rect
 
-
 # ================================================================ UI 构建
 
 def build_chat(parent, ctx: ChatCtx, on_mousewheel_fn) -> Any:
@@ -138,14 +137,14 @@ def build_input_row(parent, ctx: ChatCtx, cfg,
                                style="Key.TEntry")
     ctx.text_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
     ctx.text_entry.bind("<Return>",
-                        lambda _e: on_text_enter(ctx))
+                        lambda _e: _submit_typed(ctx))
     ctx.text_entry.bind("<Escape>",
                         lambda _e: ctx.text_var.set(""))
     attach_edit_menu_fn(ctx.text_entry)
     ctx.send_btn = ttk.Button(
         row, text=t("发送"),
         width=_char_width_for(t("发送"), ui_tk.FONT_UI, 8),
-        command=lambda: send_typed(ctx))
+        command=lambda: _submit_typed(ctx))
     ctx.send_btn.pack(side=tk.LEFT)
     ttk.Label(row, text=t("回车发送 · Esc 清空"),
               style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
@@ -177,10 +176,20 @@ def set_text_input_enabled(ctx: ChatCtx, on: bool) -> None:
         w.state(["!disabled"] if on else ["disabled"])
 
 
+def _submit_typed(ctx: ChatCtx) -> str:
+    """Route both input controls through the current engines and status callback."""
+    return on_text_enter(ctx, list(ctx.engines_ref), list(ctx.engine_dirs_ref),
+                         ctx.set_status_fn)
+
+
 def on_text_enter(ctx: ChatCtx, engines: list = (), engine_dirs: list = (), set_status_fn=None) -> str:
     """Entry 的 ``<Return>`` 回调：发送并吃掉事件。"""
     send_typed(ctx, list(engines), list(engine_dirs), set_status_fn)
     return "break"                  # 吃掉回车：否则 Tk 会再响一声提示音
+
+def _notify(set_status_fn, level: str, msg: str) -> None:
+    if set_status_fn is not None:
+        set_status_fn(level, msg)
 
 
 def send_typed(ctx: ChatCtx, engines: list, engine_dirs: list,
@@ -193,15 +202,15 @@ def send_typed(ctx: ChatCtx, engines: list, engine_dirs: list,
         return
     targets = [e for e, dirn in zip(engines, engine_dirs) if dirn == "mine"]
     if not targets:
-        set_status_fn("warn", t("打字替代的是麦克风 —— 先点「开始翻译」，"
-                                "且方向要含「我说」"))
+        _notify(set_status_fn, "warn", t("打字替代的是麦克风 —— 先点「开始翻译」，"
+                                        "且方向要含「我说」"))
         return
     sent = sum(1 for e in targets if e.send_text(text))
     if sent:
         ctx.text_var.set("")      # 清空：肉眼确认已发出
-        set_status_fn("info", t("打字已送出（{n} 字），翻译中…", n=len(text)))
+        _notify(set_status_fn, "info", t("打字已送出（{n} 字），翻译中…", n=len(text)))
     else:
-        set_status_fn("warn", t("引擎还没就绪，稍后重试"))
+        _notify(set_status_fn, "warn", t("引擎还没就绪，稍后重试"))
 
 
 # ================================================================ API 密钥
@@ -475,6 +484,7 @@ def refresh_status(ctx: ChatCtx, engines: list, direction_var,
 def setup_poll_ctx(ctx: ChatCtx, gui) -> None:
     """设置 ChatCtx 上的回调引用（从 gui 实例读取）。"""
     c = ctx; c.q = gui._q; c.engines_ref = gui._engines; c.engine_dirs_ref = gui._engine_dirs
+    c.set_status_fn = gui._set_status          # 打字发送的状态回报（issue #110）
     c.room_status_next = gui._room_status_next; c.gate_level_tick = gui._gate_level_tick
     # 活引用：闭包捕获的是 gui 实例，取值发生在**每跳 poll 里**，所以
     # 桌面字幕/手腕屏晚于构建期创建也能被 tick（见 ChatCtx 里那段说明）

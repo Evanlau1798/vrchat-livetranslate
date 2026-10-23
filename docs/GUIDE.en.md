@@ -18,6 +18,12 @@ Grab **`VRChatLiveTranslate.exe`** from
 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)**
 (**single file, no install, no console window**) and double-click it.
 
+> 🌏 **If GitHub is unreachable** (common from mainland China), use the direct links below — they are
+> served from this project's own CDN and need no GitHub access:
+> - Windows: <https://dl.kcm-nixi.cn/VRChatLiveTranslate.exe>
+> - Linux: <https://dl.kcm-nixi.cn/VRChatLiveTranslate-x86_64.AppImage>
+> - Checksums: <https://dl.kcm-nixi.cn/SHA256SUMS.txt> (one line each for the exe and the AppImage)
+
 - You still need your own **Qwen Cloud API key**: paste and save it in "⚙ Settings"
 - Config and logs live in `%APPDATA%\vrchat-livetranslate` (works even if the exe sits in a read-only folder)
 - Want a portable build (config travels with the exe) → put an **empty `portable.txt`** next to the exe
@@ -34,6 +40,11 @@ It **checks automatically**, but **never installs on its own** — whether and w
   - **Next time** → no more popups this run; it checks again on the next launch
   - **Skip this version** → ignores this version; you'll be told about the next one
 - Download failed → you can retry, or click "Open the download page" in the window and grab it from Releases yourself
+- **Where updates come from**: both the version check and the download go through this project's own CDN
+  (`dl.kcm-nixi.cn`, hosted on Cloudflare R2) — **no GitHub access needed**, which is why it keeps
+  working on mainland-China networks. If that primary source is unavailable it falls back to
+  GitHub Releases automatically (you only see "check failed" when both are unreachable); and if a
+  download breaks off halfway it retries once from the fallback source
 - Want to check when there's no popup → "⚙ Settings → Software update → Check for updates"
 - Updating **never touches your config or API key**; after a successful update the next launch tells you so
 
@@ -594,6 +605,8 @@ wrist overlay / desktop subtitles.
 | Nothing in the bubble | VRChat not running / OSC off / chat bubble visibility is Off. If `--dry-run` shows send logs, the program side is fine |
 | `[loopback] ❌ no loopback device found` | VRChat isn't playing any sound; or you're **running inside a Remote Desktop session** (WASAPI endpoints are per-session isolated — you must be on the physical machine's current session) |
 | Microphone captures nothing | Same as above; first check which device is selected in the dropdown under "⚙ Settings" (when enumeration is empty the status bar notes that empty enumeration is normal in a remote session). Search the log for `[mic]`: "已回落到同名设备" means this sound card's WASAPI endpoint could not be opened and the program switched to another audio interface by itself (normal, nothing to do); only "所有候选设备都打不开" is a real failure |
+| Music / browser / system sounds get mixed into other people's speech | That's what endpoint mode does — it captures the whole output endpoint. Settings → Audio → **Capture mode** → "VRChat only (process)" captures just the game (Win10 21H2+). While VRChat isn't running this leg waits — that's expected. Switch back to "Endpoint mix" for the old behavior (takes effect on the next start) |
+| Want to hear your own translation (sidetone) | Tick **Sidetone** in the main window's output row (the switch lives there); volume and "Sidetone output" (headphones recommended) are in Settings → Audio. If it shares the device with VRChat audio, starting translation switches capture to "VRChat only (process)" so your own TTS isn't translated again; on systems without it, sidetone is turned off with a notice |
 | `Voice 'Chelsie' is not supported` | `session.voice` is unset. Keep it at `Tina` |
 | `Invalid translation parameter` | `session.update` is missing the `translation` field (guaranteed in code; watch out if you modify it) |
 | `1007 Requests rate limit exceeded` | Hit RPM 10. Wait 1 minute; don't restart frequently (**every WS connection counts as one request**) |
@@ -639,7 +652,7 @@ vlt/
 server/                   The multiplayer room server (Cloudflare Worker + Durable Object, deployed separately)
 scripts/                  Probes and debug tools (probe_* / osc_listen / verify_release / room_e2e_local)
                           + run_tests.py (test runner) + verify/ (on-device acceptance scripts, need a real desktop/hardware — not run in CI)
-tests/                    95 files, 718 test functions (all run offline; CI runs them file by
+tests/                    101 files, 785 test functions (all run offline; CI runs them file by
                           file, and does not include tests/test_engine.py, which needs a real API key)
 docs/                     The three P0.5 / P1 / P2 measured results (protocol, latency, wrist overlay)
 testdata/                 Bundled test audio (Chinese 8.56 s, English 7.92 s, 16 kHz mono PCM)
@@ -699,12 +712,13 @@ By default the build then really runs `exe --self-test` once; only finding `GUI_
   syntax check → static check (ruff `F,E9` tier, blocking) → credential scan → all offline tests file by file (coverage accumulated along the way, summary printed at the end, no threshold, non-blocking) → then a separate **packaging-pipeline** check (artifact exists and is ≥ 20 MB)
 - **Release** (`.github/workflows/release.yml`, triggered by pushing a `v*` tag):
   first reconciles the tag against `__version__` in `vlt/__init__.py` (mismatch = hard fail) → packages the **exe and the Linux AppImage** →
-  creates the Release with the **exe**, **`VRChatLiveTranslate-x86_64.AppImage`** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is a transition aid for clients up to v0.2.0, which only look for it)
+  **publishes them to Cloudflare R2** (`dl.kcm-nixi.cn` — the primary source the client uses to check for and download updates; after the upload it re-downloads both artifacts through the public domain and verifies them byte-for-byte, and any mismatch fails the whole run instead of creating a Release) →
+  creates the Release with the **exe**, **`VRChatLiveTranslate-x86_64.AppImage`** and `SHA256SUMS.txt` attached (GitHub shows a `sha256:…` digest next to every asset; the checksum file is what the guides point users at to verify a download (one line per asset; the publish script refuses to release unless both lines match the artifacts))
 - **Want to verify a download yourself**: `scripts/verify_release.py` pulls the Release assets and reconciles them
   (SHA256, actually runs `--self-test`, version line, searches bytecode for new-feature strings, icon pixel comparison):
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.11.2 "_maybe_apply_anchor,CTX_FLUSH,_write_proxy_leaves,_yaml_set_or_create_checked"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
   ```
 
 ---

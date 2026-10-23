@@ -14,7 +14,8 @@ import yaml
 
 from . import endpoints
 from .session.base import (SessionConfig, DEFAULT_FINAL_SILENCE_S,
-                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_USER_QUIET_S, _PolicyWords)
+                           DEFAULT_FAST_FINAL_SILENCE_S, DEFAULT_FAST_FINAL_USER_QUIET_S, _PolicyWords,
+                           DEFAULT_VAD_SILENCE_MS, VAD_SILENCE_MS_MIN, VAD_SILENCE_MS_MAX)
 
 from .paths import APP_DIR, BUNDLE_DIR
 
@@ -166,6 +167,8 @@ class Direction:
             # 全局专有词库 + 本方向的覆盖，合并口径只有 merge_hotwords 一处
             hotwords=merge_hotwords(base.get("glossary"), self.hotwords),
             turn_detection=base.get("turn_detection"),
+            # 服务端静音断句阈值（实测：默认档 4s → 500ms 只要 0.5s）
+            silence_duration_ms=_vad_silence_ms(base.get("silence_duration_ms")),
             base_url=base["base_url"],
             # provider 只随会话带出去供日志/诊断；实际地址仍由 base_url 决定。
             provider=base.get("provider", endpoints.DEFAULT_PROVIDER),
@@ -271,6 +274,18 @@ def _int_clamped(value, default: int, *, key: str, lo: int, hi: int) -> int:
         print(f"[config] ⚠️ {key}={n} 超出合理范围 [{lo}, {hi}] → 夹到 {clamped}", flush=True)
         return clamped
     return n
+
+
+def _vad_silence_ms(value) -> int:
+    """服务端静音断句阈值（ms）。
+
+    **缺省不告警**：老用户的 config.yaml 里没有这个键，属正常情况（不能像脏值那样打 `⚠️`）；
+    只有真的写错/越界才留痕。
+    """
+    if value is None or value == "":
+        return DEFAULT_VAD_SILENCE_MS
+    return _int_clamped(value, DEFAULT_VAD_SILENCE_MS, key="session.silence_duration_ms",
+                        lo=VAD_SILENCE_MS_MIN, hi=VAD_SILENCE_MS_MAX)
 
 
 def _float_in_range(value, default: float, *, key: str, lo: float, hi: float,
@@ -416,6 +431,7 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "provider": provider,
         "voice": s.get("voice", "Tina"),
         "turn_detection": s.get("turn_detection"),
+        "silence_duration_ms": _vad_silence_ms(s.get("silence_duration_ms")),
         "reconnect_backoff": s.get("reconnect_backoff", [2, 5, 10, 30]),
         "max_new_sessions_per_minute": s.get("max_new_sessions_per_minute", 4),
         "final_silence_s": float(s.get("final_silence_s", DEFAULT_FINAL_SILENCE_S)),  # 默认值必须 > 服务端增量间隔（实测最大 2.3s），改小会让最终版在句子中间抢跑
@@ -459,6 +475,9 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
     raw_level = raw_audio.get("level") or {}
     if not isinstance(raw_level, dict):
         raw_level = {}
+    raw_monitor = raw_audio.get("monitor") or {}
+    if not isinstance(raw_monitor, dict):
+        raw_monitor = {}
     raw_capture = raw.get("capture") or {}
     raw_textin = raw.get("text_input") or {}
     # room 段原样带出（脏值交给 RoomConfig.from_dict 回落 + 留痕）；
@@ -485,6 +504,15 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
                 # 「首次启用说明已弹过」标记：程序自己维护（见 gui_proxy_hint），用户不用管。
                 # 放在配置里而不是内存/状态文件：用户换机拷配置时不该再被弹一次。
                 "hint_shown": bool(raw_proxy.get("hint_shown", False)),
+            },
+            # 耳返（sidetone）：把译音再放一份给用户自己听，音量独立。
+            # ⚠️ 默认关闭：第一次开耳返的人常会以为「怎么有回声」，先让人主动开。
+            "monitor": {
+                "enabled": bool(raw_monitor.get("enabled", False)),
+                "device_name": str(raw_monitor.get("device_name") or ""),
+                "volume": _float_in_range(
+                    raw_monitor.get("volume", 70.0), 70.0,
+                    key="output.audio.monitor.volume", lo=0.0, hi=100.0),
             },
             # 译音音量（对齐麦克风）：治「译音比原声响/轻」。原声直通与译音**共用同一条**
             # 虚拟声卡输出流，VRChat 的麦克风音量只能整体调 → 两条腿的相对失配只能在程序内修。
@@ -527,6 +555,12 @@ def load_config(path: str | Path | None = None, api_key: str | None = None,
         "capture": {
             "mic_device": str(raw_capture.get("mic_device") or ""),
             "loopback_device": str(raw_capture.get("loopback_device") or ""),
+            # 「别人说话」这条腿采什么：endpoint = 整个输出端点的混音（旧行为、默认）；
+            # process = 只抓 VRChat 进程树（WASAPI process loopback，Win10 21H2+）。
+            # 默认 endpoint 是刻意的：process 是新腿，先 opt-in，真机 A/B 绿了再翻默认。
+            "loopback_mode": _str_choice(
+                raw_capture.get("loopback_mode", "endpoint"), "endpoint",
+                key="capture.loopback_mode", choices=("endpoint", "process")),
             # 输入门限（只作用于 loopback = VRChat 输出「别人说话」那条腿）：
             # 原样透传，取值校验在 engine.input_gate_settings 里做（非法值留痕 + 回落默认值）。
             # ⚠️ 默认值必须与 engine 的 INPUT_GATE_DEFAULT_* 一致（这里不能 import engine：

@@ -25,13 +25,18 @@ session:
   # 这是「说话译音」的音色（实时模型直出）；也可在界面「⚙ 设置 → 音色」里选。
   # 音色 id 按模型区分，不能与下面 text_input.tts 的音色表混用。
   voice: Tina
-  # 断句：留空 = 用服务端默认（3.8 为 speaker_detection）；也可填 server_vad
-  # 实测（2026-10-01，4 轮真链路）：填 server_vad 会让**首条译文更早出现**
-  #   短句：开口后 1.19~1.23s → 0.57~0.69s（早 ~0.6s）
-  #   长句：开口后 3.29~3.35s → 2.30~2.48s（早 ~0.9s）
-  # ⚠️ 代价：server_vad 按**静音**判停，speaker_detection 认「谁在说」→ 环境嘈杂、或你中途
-  #    停顿较久时，更容易在句子中间断句（译文被切成更多小段）。吵的环境建议留空。
+  # ⚠️ 已废弃（2026-10）：恒用 server_vad。本程序不消费模型的说话人标签，
+  #    而 speaker_detection（旧默认）实测「说完→译文」2.5s、完全不填 4.0s，
+  #    server_vad + 500ms 只要 0.5s。写任何值都会在日志里提示「已废弃」，不再改变下发内容。
   turn_detection: null
+  # 服务端静音断句阈值（ms，范围 200~6000）。实测（2026-10-21，千问云 host，各 10 句）
+  # 「说完 → 最终译文」的端到端耗时：
+  #   不下发 turn_detection（服务端默认 speaker_detection） 4.0~4.2s
+  #   speaker_detection + 1000ms                            2.5s
+  #   server_vad + 1000ms                                   0.97s
+  #   server_vad + 500ms                                    0.53s   ← 默认
+  #   server_vad + 300ms                                    0.39s（会吞句首：10 句里 4 句丢开头）
+  silence_duration_ms: 500
   # 静默兜底：服务端在持续音频下可能长时间不发 response.done，
   # 超过这个静默时长就把累计文本当最终版发出（保证「句末刷最终版」必达）。
   # ⚠️ 必须大于服务端的增量间隔（实测连续说话时相邻 delta 最大 2.3s）——
@@ -78,6 +83,15 @@ capture:
   mic_device: ""            # Windows 设备名 / Linux node.name；空 = 自动检测
   loopback_device: ""       # 「别人说话」的采集端点；空 = 自动回退链
                             # Linux 上就是 VRChat 输出到的那个 sink（见 GUIDE.linux.md 第六节）
+  # 「别人说话」这条腿采什么：
+  #   endpoint（默认）= 抓整个输出端点的混音 —— 浏览器、音乐、系统提示音也会被当成
+  #                     「游戏内语音」送进模型（旧行为）。
+  #   process        = 只抓 VRChat 进程树（WASAPI process loopback，Win10 21H2+ 支持）。
+  #                     VRChat 没启动时这条腿等待，启动后自动接上；重启也会自动续上。
+  #                     ⚠️ 这条腿的电平比 endpoint 高约 7dB，切过去后输入门限要重新调；
+  #                     用不惯随时改回 endpoint 即可（下次开始翻译才生效）。
+  # Linux 上本项被忽略（那边一直只抓 VRChat 的应用流节点）。
+  loopback_mode: endpoint
   # ---- 输入门限（只作用于 VRChat 输出 = 「别人说话」那条腿）----
   # 治什么：VRChat 把人声混成一路输出，远处玩家声音小、本来就听不清，以前照样被送给
   # 模型 → 白花钱还容易被翻成乱话。开启后按**每 100ms 块的 RMS 响度**（不是峰值：
@@ -217,6 +231,10 @@ overlay:
                              #    ⇒ Linux 上留空即可（写这条 Windows 路径没意义：文件不存在）。
                              #    只有「fontconfig 里一套中日韩字体都没有」时才会退到位图字体，
                              #    那时才画不出中文。
+                             # ⚠️ 本项只管**主字体**：韩文/泰文的字形不在雅黑这类中日韩字体里，
+                             #    它们由程序按书写系统自动另找一份（韩文→Malgun Gothic、
+                             #    泰文→Leelawadee UI；Linux 走 `fc-list :lang=ko|th`），
+                             #    一份都找不到时日志会打一行「找不到含…字形的字体」——详见 GUIDE 排障表。
   font_size: 36              # 译文字号（「设置 → 手腕屏」里可拖；调小 → 同样高度能塞更多字）
   source_font_size: 29       # 原文小字号（同上）
   max_lines: 3               # 译文最多显示几行（超出保留最新）
@@ -320,6 +338,20 @@ output:
       max_step_db: 3.0         # 单句最大增益变化（防音量跳变）
       mic_min_blocks: 8        # 至少 8 个 100ms 有声块（0.8s 语音）才采信麦克风电平
       mic_window_s: 120        # 这段时间内没再听到你说话 → 参考视为过期，增益保持不动
+    # 耳返（sidetone）：把送进虚拟声卡的译音**同时**放给你自己听（通常选耳机）。
+    # 开关在**主界面「输出」行**（日常会开关）；音量与输出设备在「设置 → 音频」。
+    # 音量独立于对方听到的响度；0 = 静音。默认关闭（第一次开常被当成回声）。
+    # 平台：Windows 走 PortAudio；Linux 走 `pw-cat --playback`（PipeWire 原生，
+    #    不依赖 sounddevice）。device_name 在 Linux 上存 PipeWire `node.name`，
+    #    留空 = 系统默认输出。
+    # ⚠️ 耳返设备若与「VRChat 音频」是同一个端点、而采集方式还是 endpoint，程序会
+    #    **自动改用 process 采集**（只抓 VRChat）以避免把自己的译音再翻一遍；
+    #    系统不支持 process 时耳返会被自动关掉（状态栏与日志会说明原因）。
+    #    Linux 的「VRChat 音频」固定按应用流采集，不存在这个回路，无需处理。
+    monitor:
+      enabled: false
+      device_name: ""        # 空 = 系统默认输出（建议选耳机）
+      volume: 70             # 0-100（%）
                                #（过期后 follow_mic 保住上一次增益，并留一行「参考取不到」）
 
 # 打字输入（不想开麦时用键盘代替说话：界面下方输入框 + 回车发送）

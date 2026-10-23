@@ -53,6 +53,7 @@ class ChatCtx:
 
     # ── 状态栏 ──
     last_status_level: str = "info"
+    set_status_fn: Optional[Callable] = None
 
     # ── 房间轮询 ──
     room_status_next: float = 0.0

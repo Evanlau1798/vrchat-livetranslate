@@ -155,6 +155,26 @@ STRINGS: dict[str, str] = {
     "设备选择自动保存到 config.yaml": "Device selection is saved to config.yaml automatically",
     "Linux：VRChat 音频与译音输出已自动处理":
         "Linux: VRChat audio and voice output are handled automatically",
+    "采集方式:": "Capture mode:",
+    "端点混音（含其它应用）": "Endpoint mix (incl. other apps)",
+    "只抓 VRChat（进程）": "VRChat only (process)",
+    "采集方式：{mode}": "Capture mode: {mode}",
+    "耳返": "Sidetone",
+    "耳返音量:": "Sidetone volume:",
+    "耳返输出:": "Sidetone output:",
+    "耳返打开失败（设备被占用或不可用），其余功能不受影响":
+        "Sidetone failed to open (device busy or unavailable); everything else is unaffected",
+    "耳返设备打不开，已禁用耳返（其余功能不受影响）":
+        "Cannot open the sidetone device; sidetone is disabled (everything else is unaffected)",
+    "耳返暂不支持当前平台": "Sidetone is not supported on this platform",
+    "耳返：{device}，音量 {vol}%": "Sidetone: {device}, volume {vol}%",
+    "耳返已关闭": "Sidetone off",
+    "耳返要配合「译音输出」才有声音": "Sidetone only produces sound together with the Voice Output switch",
+    "耳返要麦克风代理才能出声（设置 → 音频 → 麦克风代理）": "Sidetone needs the Mic Proxy to produce sound (Settings → Audio → Mic Proxy)",
+    "系统默认输出": "System default output",
+    "耳返会同时放给你自己听；与 VRChat 音频同设备时采集会自动改为只抓 VRChat":
+        "Sidetone plays the translation back to you; if it shares the device with VRChat audio, "
+        "capture switches to VRChat-only automatically",
     # ---- 设置弹窗：输入门限（只作用于 VRChat 输出 /「别人说话」）----
     "输入门限": "Input Gate",
     "启用 —— 低于门限的声音不翻译（滤掉远处说话小声的玩家）":
@@ -399,6 +419,8 @@ STRINGS: dict[str, str] = {
     "下载的文件与发布页的摘要对不上，已删除（请重试）":
         "The downloaded file doesn't match the checksum on the release page; "
         "it has been deleted (please retry)",
+    "备用源上的版本是 v{got}，与要装的 v{want} 不同：已放弃回退":
+        "The fallback source has v{got} while v{want} is needed — not falling back",
     "手腕屏已开启（位置 / 字号等见「设置 → 手腕屏」）":
         "Wrist overlay is on — position, font size and more are under "
         "\"Settings → Wrist Overlay\"",
@@ -516,6 +538,11 @@ STRINGS: dict[str, str] = {
         "Microphone switched (passthrough applied now; translation input takes effect when translation restarts)",
     "麦克风已保存（切换未即时生效，下次启动生效）":
         "Microphone saved (not applied instantly; takes effect on next start)",
+    "译音输出已切换（即时生效）": "Translated output switched (applied instantly)",
+    "译音输出已保存（切换未即时生效，下次启动生效）":
+        "Translated output saved (not applied instantly; takes effect on next start)",
+    "切换译音输出失败：找不到设备 {dev}（保持旧端点）":
+        "Failed to switch translated output: device {dev} not found (keeping the old endpoint)",
     "缓冲已更新（即时生效）": "Buffers updated (applied instantly)",
     "缓冲已保存（译音缓冲下次开始翻译生效）":
         "Buffers saved (translated buffer applies next time translation starts)",

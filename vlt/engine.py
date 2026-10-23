@@ -99,6 +99,7 @@ INPUT_GATE_DEFAULT_ENABLED = True
 INPUT_GATE_DEFAULT_DB = -45.0
 INPUT_GATE_DEFAULT_HOLD_MS = 500.0     # 超阈值后，回落多久内仍继续送（防句中断裂）
 INPUT_GATE_DEFAULT_PREROLL_MS = 250    # 开闸时补发的、越阈值之前的音频（防丢句首）
+INPUT_GATE_DEFAULT_TAIL_MS = 600.0     # 关闸时补发的等长数字静音（毫秒）：给服务端一个明确的「停顿」
 INPUT_GATE_MIN_DB = -70.0
 INPUT_GATE_MAX_DB = -10.0
 LEVEL_FLOOR_DB = -120.0                # 电平下限（纯数字静音时用它，避免 log10(0)）
@@ -257,6 +258,12 @@ class _SilenceGate:
         self.gated_chunks = 0        # 本次闸住累计拦截的块数（关闸时清零）
         self.replay_count = 0        # 累计补发 preroll 的次数
 
+    def reset(self) -> None:
+        self.closed = False
+        self._silent_since = None
+        self._preroll.clear()
+        self._preroll_dur = 0.0
+
     def feed(self, chunk: bytes, *, loud: bool, dur_s: float, now: float) -> list[bytes]:
         """返回本次真正要上送的块序列（0..N 块；N>1 是开闸补发 preroll 的情形）。"""
         if loud:
@@ -310,7 +317,12 @@ class _LevelGate:
       说话句中的停顿、句尾渐弱不会被切碎（默认 500ms）。
     - **preroll**：开闸时把越阈值之前的一小段（默认 250ms）补上 ——
       句首辅音/起音不丢，否则识别会掉字。
-    - 只**暂停上送**，不改写、不伪造音频（与服务端 turn_detection 的节奏假设一致）。
+    - **tail**：关闸时先补一小段**等长数字静音**（默认 600ms）再停 —— 上送流是一条
+      **时间轴**，只在轴上挖洞（什么也不发）会同时坏两件事：① 服务端 turn_detection
+      收不到「停顿」就永远不给这一轮收尾（实测有一轮拖到 196.7s，译文要等下一次长静音
+      才吐）；② 服务端把不相邻的两段语音当成同一轮连着听，ASR 会串出乱句。
+      补静音=明确给出停顿、保住时间轴；只补一小段是因为静音占比一高模型容易滑进
+      repeat 输出（麦克风腿就是这样被 `_SilenceGate` 闸住的），600ms 够触发一次收尾。
 
     与 `_SilenceGate` 的关系：职责不同、串联工作。本闸门治「小声」（用户要的过滤），
     静音闸门治「长时间真静音」（防服务端 repeat 掉线）。本闸门拦掉的块不会进入
@@ -318,11 +330,12 @@ class _LevelGate:
     """
 
     def __init__(self, enabled: bool, threshold_db: float, hold_ms: float,
-                 preroll_ms: int) -> None:
+                 preroll_ms: int, tail_ms: float = INPUT_GATE_DEFAULT_TAIL_MS) -> None:
         self.enabled = enabled
         self.threshold_db = threshold_db
         self.hold_ms = hold_ms
         self.preroll_ms = preroll_ms
+        self.tail_ms = max(0.0, float(tail_ms))   # 0 = 关掉补静音（回到「只停送」的旧行为）
         self.is_open = False                 # 当前是否在上送（开闸）
         self._last_loud_ts: float | None = None
         self._preroll: deque[tuple[bytes, float]] = deque()
@@ -331,6 +344,14 @@ class _LevelGate:
         self.dropped_chunks = 0              # 累计拦截（未上送）的块数
         self.opened = 0                      # 开闸次数
         self.replay_count = 0                # 补发 preroll 的次数
+        self.tail_chunks = 0                 # 累计补发的数字静音块数（关闸时那一下）
+
+    def reset(self) -> None:
+        self.is_open = False
+        self._last_loud_ts = None
+        self._preroll.clear()
+        self._preroll_ms = 0.0
+        self.level_db = LEVEL_FLOOR_DB
 
     def feed(self, chunk: bytes, *, now: float, dur_s: float) -> list[bytes]:
         """返回本次真正要上送的块序列（0..N 块；N>1 = 开闸补发 preroll 的情形）。"""
@@ -361,12 +382,32 @@ class _LevelGate:
             if held:
                 return [chunk]              # hold 期内继续送：句中的停顿不切碎
             self.is_open = False
+            tail = self._silence_tail(len(chunk))
+            self.tail_chunks += len(tail)
+            self.dropped_chunks += 1
+            self._remember(chunk, dur_s)
             print(f"[gate] 输入门限：已回落 {self.hold_ms:g}ms 低于门限 "
                   f"{self.threshold_db:g} dBFS（当前 {db:.1f}）→ 暂停上送"
-                  f"（累计已拦截 {self.dropped_chunks} 块）", flush=True)
+                  f"（并补发 {len(tail)} 块数字静音 ≈{self.tail_ms:g}ms，"
+                  f"让服务端收到停顿、及时给这一轮收尾；累计已拦截 {self.dropped_chunks} 块）",
+                  flush=True)
+            return tail
         self.dropped_chunks += 1
         self._remember(chunk, dur_s)
         return []
+
+    def _silence_tail(self, nbytes: int) -> list[bytes]:
+        """关闸那一下补的**等长数字静音**（块数 = tail_ms / 单块时长，至少 1 块）。
+
+        块长必须与采集块一致：服务端按时间轴对齐，发不等长的块会把它自己的断句节奏带偏。
+        `tail_ms=0` 或空块 → 不补（回到「只停送」的旧行为）。
+        """
+        if self.tail_ms <= 0 or nbytes <= 0:
+            return []
+        block_ms = nbytes / 2 / 16000.0 * 1000.0        # 16k 单声道 s16le：2 字节/样本
+        if block_ms <= 0:
+            return []
+        return [b"\x00" * nbytes] * max(1, int(round(self.tail_ms / block_ms)))
 
     def _remember(self, chunk: bytes, dur_s: float) -> None:
         if self.preroll_ms <= 0:
@@ -435,10 +476,15 @@ class _SessionProxy:
         for chunk in chunks:
             await self._send_one(chunk)
 
-    def end_input_segment(self) -> None:
+    def end_input_segment(self) -> bool:
         session = self._engine._session
         if getattr(getattr(session, 'cfg', None), 'provider', None) == endpoints.PROVIDER_CHATGPT:
             session.end_input_segment()
+            return True
+        return False
+
+    def reset_input(self) -> None:
+        self._gate.reset()
 
     def _note_voice(self) -> None:
         """把「这一块有人在说话」上报给**当前**会话（重连后自动落到新会话上）。
@@ -1537,7 +1583,8 @@ class Engine:
             await run_loopback(self._proxy, None, device_name=loopback_name,
                                stop_event=self._stop_event,
                                on_status=self._events.on_status,
-                               gate=self._input_gate)
+                               gate=self._input_gate,
+                               loopback_mode=str(capture_cfg.get("loopback_mode") or "endpoint"))
             # 输入门限只接在这条腿：VRChat 输出 = 别人说话，远处小声的玩家该被滤掉。
 
     async def _feed_pcm(self, path: str) -> None:
@@ -1883,7 +1930,7 @@ class Engine:
             lines.append(f"[diag] 输入门限（loopback）：门限 {ig.threshold_db:g} dBFS | "
                          f"当前{'上送中' if ig.is_open else '拦截中'} | "
                          f"已拦截 {ig.dropped_chunks} 块 | 开闸 {ig.opened} 次"
-                         f"（补发 preroll {ig.replay_count} 次）| "
+                         f"（补发 preroll {ig.replay_count} 次 / 关闸补静音 {ig.tail_chunks} 块）| "
                          f"最近一块电平 {ig.level_db:.1f} dBFS")
         if self._repeat_dropped:
             lines.append(f"[diag] 本地 repeat 抑制：已丢弃 {self._repeat_dropped} 条重复输出"
@@ -2010,17 +2057,17 @@ async def _send_gated(session, tele, label: str, pcm16: bytes,
     out_chunks = ([pcm16] if gate is None else
                   gate.feed(pcm16, now=time.monotonic(),
                             dur_s=len(pcm16) / 2 / 16000.0))
+    if was_open and not gate.is_open:
+        finish = getattr(session, 'end_input_segment', None)
+        # Subscription ASR seals recorded PCM explicitly; only realtime providers need the synthetic tail.
+        if callable(finish) and finish() is True:
+            out_chunks = []
     sent = 0
     for c in out_chunks:
         await session.send_audio(c)
         sent += len(c)                    # 只算真正上送的（门限拦掉的不计）
         if tele is not None:
             tele.add(f"{label}_chunk", bytes=len(c))
-    if was_open and not gate.is_open:
-        # A wall-clock hold can deliver less than the segmenter's PCM silence budget.
-        finish = getattr(session, 'end_input_segment', None)
-        if callable(finish):
-            finish()
     return sent
 
 
@@ -2028,22 +2075,49 @@ def _gate_tail(gate: "_LevelGate | None") -> str:
     """「采集结束」行上的输入门限小结（两条腿共用一处口径，别各写一遍）。"""
     if gate is not None and gate.enabled and (gate.dropped_chunks or gate.opened):
         return (f"｜输入门限（{gate.threshold_db:g} dBFS）：拦截 {gate.dropped_chunks} 块、"
-                f"开闸 {gate.opened} 次")
+                f"开闸 {gate.opened} 次、关闸补静音 {gate.tail_chunks} 块"
+                f"（{gate.tail_ms:g}ms/次）")
     return ""
 
 
+def _close_capture_source(source, session, gate, finalize=False):
+    try:
+        if finalize:
+            finish = getattr(session, 'end_input_segment', None)
+            if callable(finish):
+                finish()
+    finally:
+        try:
+            source.close()
+        finally:
+            if gate is not None:
+                gate.reset()
+            reset = getattr(session, 'reset_input', None)
+            if callable(reset):
+                reset()
+
+
 async def _pump_capture(session, tele, seconds: float, stop_event, label: str, opener,
-                       gate: "_LevelGate | None" = None) -> int:
+                       gate: "_LevelGate | None" = None,
+                       keep_alive: "Callable[[], bool] | None" = None) -> int:
     """共用的采集泵：开流 → 拉块 → 送会话 → 一定关流。返回送出的字节数。
 
     两个平台（Windows 的 PortAudio 回调 / Linux 的 pw-record 子进程）在这里被抹平，
     引擎只看到 `await source.read()`。关流顺序由 `AudioSource.close()` 内部保证。
+
+    `keep_alive`：可选的「这条腿还该不该继续」判据（每轮读之前问一次）。Windows 的
+    进程模式用它判断目标进程是否已退出 —— 进程没了就得结束这一段、回外层去等待，
+    否则 `read()` 只会一直返回 None（哑流），上层永远显示"在采集"。
     """
     source = opener()
     end = None if seconds <= 0 else time.perf_counter() + seconds
     sent = 0
+    ended = False
     try:
         while (end is None or time.perf_counter() < end) and not _stop_requested(stop_event):
+            if keep_alive is not None and not keep_alive():
+                ended = True
+                break
             chunk = await source.read(timeout=1.0)
             if chunk is None:
                 continue                      # 超时：还活着但暂时没数据
@@ -2052,7 +2126,7 @@ async def _pump_capture(session, tele, seconds: float, stop_event, label: str, o
                 continue
             sent += await _send_gated(session, tele, label, pcm16, gate)
     finally:
-        source.close()
+        _close_capture_source(source, session, gate, finalize=ended)
     return sent
 
 
@@ -2210,6 +2284,72 @@ def pick_loopback_target(patterns: list[str] | None = None,
     return _as_target(loops[0])
 
 
+def _output_name_of(index: int) -> str:
+    """输出设备 index → 名字（拿不到返回空串，绝不抛）。"""
+    try:
+        backend = platform.device_backend()
+        for i, d in enumerate(backend.query_devices()):
+            if int(d.get("pa_index", i)) == int(index):
+                return str(d.get("name") or "")
+    except Exception:                            # noqa: BLE001
+        pass
+    return ""
+
+
+def _default_output_name() -> str:
+    try:
+        return _output_name_of(int(platform.device_backend().default_output_index()))
+    except Exception:                            # noqa: BLE001
+        return ""
+
+
+def monitor_capture_conflict(monitor_cfg: dict, capture_cfg: dict) -> bool:
+    """耳返设备与「别人说话」的采集端点是不是**同一个输出设备**。
+
+    为什么按端点判而不是按名字字符串：采集端点名是「输出设备名 + [Loopback]」
+    （`pyaudiowpatch` 的命名），要先剥后缀；任一侧留着「自动」就解析成系统默认输出。
+    拿不准（枚举失败 / 找不到目标）一律返回 False —— 宁可漏判、由用户自己听出来，
+    也不要因为一次枚举失败就把采集方式悄悄改掉。
+    """
+    if platform.IS_LINUX:
+        # Linux 的「别人说话」固定按 VRChat 应用流采集（`pick_vrchat_targets`），
+        # 耳返放到任何 sink 都进不了那条腿 —— 不存在 Windows 端点 loopback 的回灌面。
+        # 不在这里早退的话，耳返选中默认输出时 `pick_loopback_target()` 会把它判成
+        # 「同一设备」，进而被 `apply_ear_monitor_policy()` 以「不支持 process」误关。
+        return False
+    mon_name = str((monitor_cfg or {}).get("device_name") or "").strip()
+    if not mon_name:
+        mon_name = _default_output_name()
+    else:
+        idx = resolve_device_name(mon_name, "output")
+        if idx is not None:
+            mon_name = _output_name_of(int(idx)) or mon_name
+    try:
+        target = pick_loopback_target(device_name=str((capture_cfg or {}).get("loopback_device") or "") or None)
+    except Exception:                            # noqa: BLE001
+        return False
+    if target is None:
+        return False
+    cap_name = _strip_loopback_suffix(target.name)
+    return bool(mon_name) and mon_name.strip().lower() == cap_name.strip().lower()
+
+
+def effective_loopback_mode(capture_cfg: dict, monitor_cfg: dict) -> str:
+    """耳返开着、且和采集端点是同一个设备时，把 `endpoint` 自动升级成 `process`。
+
+    为什么（用户口径）：耳返会把自己的译音放到那个端点上，端点 loopback 再把它听一遍
+    → 自己的话被当成「别人说的」再翻一遍。process 只抓 VRChat 进程树，耳返无论如何
+    都进不了采集。系统不支持 process 时**保持不变**，由调用方关掉耳返并留痕。
+    """
+    mode = str((capture_cfg or {}).get("loopback_mode") or "endpoint")
+    if not (monitor_cfg or {}).get("enabled") or mode != "endpoint":
+        return mode
+    if not monitor_capture_conflict(monitor_cfg, capture_cfg):
+        return mode
+    ok, _why = platform.process_loopback_available()
+    return "process" if ok else "endpoint"
+
+
 def pick_vrchat_targets() -> list[LoopbackTarget]:
     """Linux：定位 **VRChat 的全部音频输出流**（= 别人说话）。找不到返回空列表。
 
@@ -2306,7 +2446,8 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
                        seconds: float = 0.0, device_name: str | None = None,
                        stop_event: threading.Event | None = None,
                        on_status: Callable[[str, str], None] | None = None,
-                       gate: "_LevelGate | None" = None) -> None:
+                       gate: "_LevelGate | None" = None,
+                       loopback_mode: str = "endpoint") -> None:
     """采集 VRChat 的播放输出（= 别人说话）→ 推给会话。
     `gate` 是输入门限（`_LevelGate`）：VRChat 输出混了所有人，远处玩家声音小、
     本来就听不清，达不到门限的块就不上送（开闸时会带回 preroll 补句首）。
@@ -2316,33 +2457,136 @@ async def run_loopback(session, tele, patterns: list[str] | None = None,
     `_pump_vrchat_capture`）。#12 的教训：合并时漏了 Linux 侧，界面上门限
     「开着」、实际一条块都没判。
 
-    平台差异全部压在 `CaptureBackend.open_loopback()` 后面：
-      * Windows：WASAPI loopback（pyaudiowpatch），非阻塞轮询 + 读线程；
-                 端点由 `pick_loopback_target()` 挑（界面手选 / 回退链 / 默认输出）。
+    `loopback_mode`（`capture.loopback_mode`，默认 endpoint）：
+      * `endpoint`：抓某个系统输出端点的**混音**（旧行为；浏览器/音乐也会进来）。
+      * `process` ：只抓 VRChat 进程树（WASAPI process loopback）。平台不支持或
+        激活失败 → **回落 endpoint** 并留痕；VRChat 没启动时**等待**（不回落 ——
+        回落会把浏览器/音乐当游戏语音，正是 process 模式要消灭的东西）。
+
+    平台差异全部压在 `CaptureBackend.open_loopback()` / `open_process_loopback()` 后面：
+      * Windows：WASAPI loopback（pyaudiowpatch）或 process loopback（ctypes）；
       * Linux  ：`pw-record --target=<VRChat 输出流>`，**等 VRChat 出现再采**，
                  VRChat 退出（输出流消失）后回到等待，VRChat 重新启动自动续上。
     """
     if platform.IS_LINUX:
+        if loopback_mode == "process":
+            print("[loopback] Linux：loopback_mode=process 被忽略"
+                  "（这条腿本来就只抓 VRChat 的应用流）", flush=True)
         await _run_loopback_linux(session, tele, seconds, stop_event, on_status,
                                   gate=gate)
         return
 
+    if loopback_mode == "process":
+        ok, why = platform.process_loopback_available()
+        if not ok:
+            msg = f"进程模式不可用（{why}）→ 改用系统输出端点"
+            print(f"[loopback] ⚠️ {msg}", flush=True)
+            if on_status is not None:
+                on_status("warn", msg)
+        else:
+            await _run_loopback_process(session, tele, seconds=seconds,
+                                        stop_event=stop_event, on_status=on_status,
+                                        gate=gate)
+            return
+
+    await _run_loopback_endpoint(session, tele, patterns=patterns, seconds=seconds,
+                                 device_name=device_name, stop_event=stop_event,
+                                 on_status=on_status, gate=gate)
+
+
+async def _run_loopback_endpoint(session, tele, *, patterns: list[str] | None = None,
+                                 seconds: float = 0.0, device_name: str | None = None,
+                                 stop_event=None, on_status=None,
+                                 gate: "_LevelGate | None" = None) -> None:
+    """端点模式（旧行为）：挑一个系统输出端点，抓它的混音。"""
     target = pick_loopback_target(patterns, device_name)
     if target is None:
-        # ⚠️ 文案按平台分叉：这条分支只可能是 Windows（Linux 已在上面 return），
+        # ⚠️ 这条分支只可能是 Windows（Linux 在 run_loopback 里已分走），
         # 以前统一写「PipeWire/音频服务」，Windows 用户照着找 PipeWire 纯属误导。
-        hint = "PipeWire/音频服务" if platform.IS_LINUX else "系统音频服务（WASAPI）"
         print("[loopback] ❌ 没找到任何可采集的系统输出"
-              f"（VRChat 在跑吗？{hint}正常吗？）")
+              "（VRChat 在跑吗？系统音频服务（WASAPI）正常吗？）")
         return
     print(f"[loopback] 采集端点「{target.name}」{target.sample_rate}Hz ×{target.channels}ch"
           f" → 16kHz 单声道")
     print("[loopback] 开始采集" + ("（Ctrl+C 结束）" if seconds <= 0 else f"（{seconds:.0f}s）"))
-    sent = await _pump_capture(session, tele, seconds, stop_event, "loopback",
-                               lambda: platform.capture_backend().open_loopback(
-                                   target, blocksize=CHUNK_BYTES),
-                               gate=gate)
+    from .output.earmonitor import endpoint_capture
+    with endpoint_capture(target.name):
+        sent = await _pump_capture(session, tele, seconds, stop_event, "loopback",
+                                   lambda: platform.capture_backend().open_loopback(
+                                       target, blocksize=CHUNK_BYTES),
+                                   gate=gate)
     print(f"[loopback] 采集结束，共 {sent} bytes ≈ {sent / 2 / 16000:.0f}s{_gate_tail(gate)}")
+
+
+async def _wait_for_vrchat_process(stop_event, on_status=None, *,
+                                   poll_s: float = 2.0) -> int | None:
+    """Windows：轮询等 `VRChat.exe` 出现。返回 None = 被「停止翻译」打断。
+
+    「等」而不是「回落端点」是刻意的：这条腿在 process 模式下的语义就是「只抓 VRChat」，
+    回落端点会把浏览器/音乐/系统提示音当成游戏内语音（那正是要消灭的东西）。
+    """
+    announced = False
+    while not _stop_requested(stop_event):
+        pid = platform.find_process_pid("VRChat.exe")
+        if pid:
+            return int(pid)
+        if not announced:
+            announced = True
+            msg = "等待 VRChat 进程（启动后会自动开始采集）"
+            print(f"[loopback] {msg}", flush=True)
+            if on_status is not None:
+                on_status("info", msg)
+        await asyncio.sleep(poll_s)
+    return None
+
+
+async def _run_loopback_process(session, tele, *, seconds: float = 0.0,
+                                stop_event=None, on_status=None,
+                                gate: "_LevelGate | None" = None) -> None:
+    """Windows 进程模式：**等 VRChat → 只抓它的进程树 → 进程退出再等**。
+
+    与 Linux 腿（`_run_loopback_linux`）同一个状态机。唯一的区别是「变化」的判据：
+    Linux 看播放流节点，这里看 PID 是否还活着（`ProcessLoopbackSource.process_gone`）——
+    采集流本身在目标进程退出后**不会报错**，只会一直出全零，光看 `read()` 是发现不了的。
+    """
+    total = 0
+    t0 = time.perf_counter()
+    while not _stop_requested(stop_event):
+        remain = 0.0 if seconds <= 0 else max(0.0, seconds - (time.perf_counter() - t0))
+        if seconds > 0 and remain <= 0:
+            break
+        pid = await _wait_for_vrchat_process(stop_event, on_status)
+        if pid is None:
+            break
+        print(f"[loopback] 进程模式：VRChat.exe (PID {pid}) → 只抓它的音频"
+              "（48kHz ×2ch，事件驱动）", flush=True)
+        if on_status is not None:
+            on_status("info", f"只采集 VRChat 音频（进程 {pid}）")
+        try:
+            source = platform.open_process_loopback(pid)
+        except Exception as exc:                 # noqa: BLE001 — 回退必须留痕，不许静默
+            msg = f"进程模式打开失败（{exc}）→ 回落系统输出端点"
+            print(f"[loopback] ⚠️ {msg}", flush=True)
+            if on_status is not None:
+                on_status("warn", msg)
+            await _run_loopback_endpoint(session, tele, seconds=remain,
+                                         stop_event=stop_event, on_status=on_status,
+                                         gate=gate)
+            return
+        sent = await _pump_capture(
+            session, tele, remain, stop_event, "loopback",
+            lambda s=source: s, gate=gate,
+            keep_alive=lambda s=source: not s.process_gone() and not getattr(s, 'finished', False))
+        total += sent
+        if _stop_requested(stop_event) or seconds > 0:
+            break
+        if not source.process_gone():
+            await asyncio.sleep(2.0)
+        print("[loopback] VRChat 进程已退出（或采集流断开）→ 等待重新启动", flush=True)
+        if on_status is not None:
+            on_status("warn", "VRChat 已退出 → 等待重新启动")
+    print(f"[loopback] 采集结束，共 {total} bytes ≈ {total / 2 / 16000:.0f}s{_gate_tail(gate)}")
+
 
 
 async def _run_loopback_linux(session, tele, seconds: float, stop_event,
@@ -2404,6 +2648,7 @@ async def _pump_vrchat_capture(session, tele, stop_event,
     source = opened[0] if len(opened) == 1 else MixedAudioSource(opened)
     want = sorted(t.id for t in targets)
     sent = 0
+    ended = False
     last_check = time.monotonic()
     try:
         while not _stop_requested(stop_event):
@@ -2416,9 +2661,10 @@ async def _pump_vrchat_capture(session, tele, stop_event,
             if now - last_check >= VRCHAT_RECHECK_S:
                 last_check = now
                 if sorted(t.id for t in pick_vrchat_targets()) != want:
+                    ended = True
                     break            # 流没了 / 增减了 → 收尾，回到外层重新等待或重开
     finally:
-        source.close()
+        _close_capture_source(source, session, gate, finalize=ended)
     return sent, _stop_requested(stop_event)
 
 

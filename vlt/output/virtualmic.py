@@ -9,7 +9,7 @@ import time
 from typing import Callable
 
 from ..platform import child_env
-from ..session.chatgpt_output import allowed, current
+from ..session.chatgpt_output import allowed, current, scope
 
 log = logging.getLogger(__name__)
 
@@ -299,7 +299,7 @@ class VirtualMic:
             or time.monotonic() - self._last_push_ts >= PRIME_TIMEOUT_S
         )
 
-    def _drain(self, need_bytes: int) -> bytes:
+    def _drain(self, need_bytes: int, on_chunk=None) -> bytes:
         """从队首排空 need_bytes 字节，不足的部分补静音。**调用者必须已持有 self._lock。**
 
         抽出来是为了让两个平台共用同一段「排空 + 整句记账」逻辑：
@@ -316,6 +316,9 @@ class VirtualMic:
                 continue
             self._head_started = True
             take = min(need_bytes - len(out), len(chunk))
+            if on_chunk is not None:
+                with scope(approval):
+                    on_chunk(chunk[:take])
             out.extend(chunk[:take])
             if take < len(chunk):
                 self._buf[0] = (chunk[take:], ends, approval)

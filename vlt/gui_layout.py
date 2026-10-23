@@ -390,6 +390,17 @@ def build_output_row(gui) -> None:
                    command=gui._on_overlay_toggle, **ik).pack(side=tk.LEFT, padx=(10, 0))
     tk.Checkbutton(out_frame, text=t("译音输出"), variable=gui._vmic_var,
                    command=gui._save_audio_flag, **ik).pack(side=tk.LEFT, padx=(10, 0))
+    # 耳返（sidetone）：**开关放主界面**（日常用得上，藏在设置里要点三层）；
+    # 音量 / 输出设备仍在「设置 → 音频」。两端都有实现（Windows=PortAudio / Linux=pw-cat），
+    # 所以这里不按平台隐藏。
+    # `_monitor_var` 是**唯一**的那个变量：设置页不再新建（否则两个 BooleanVar 各说各话）。
+    mon_cfg = _audio_cfg.get("monitor") or {}
+    gui._monitor_var = tk.BooleanVar(value=bool(mon_cfg.get("enabled", False)))
+    gui._monitor_check = tk.Checkbutton(
+        out_frame, text=t("耳返"), variable=gui._monitor_var,
+        command=gui._on_monitor_change, **ik)
+    gui._monitor_check.pack(side=tk.LEFT, padx=(10, 0))
+
     # 原声/译音切换按钮（依赖 proxy；无 proxy 时禁用）
     from .ui_tk import FONT_UI as _FONT_UI
     gui._voice_mode_btn = ttk.Button(

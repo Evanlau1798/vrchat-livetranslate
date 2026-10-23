@@ -61,6 +61,7 @@ from .virtualmic import VirtualMic as VirtualMic, pick_output_device
 from .micproxy_buffers import _Ring, _TranslatedBuffer, TranslatedSink
 from . import level_match
 from .level_match import LevelConfig
+from .earmonitor import EarMonitor
 
 #: 直通缓冲默认容量（毫秒）。必须 ≥ 一个麦克风输入块（~100ms），见模块头说明。
 DEFAULT_PASSTHROUGH_MS = 150
@@ -135,6 +136,7 @@ def resample_to_48k_stereo(pcm: bytes, src_rate: int, src_channels: int = 1) -> 
     return np.repeat(mono, 2).tobytes()          # 单声道 → 立体声
 
 
+
 class MicProxy:
     """常驻麦克风代理：麦克风直通虚拟声卡（原声档）/ 译音灌虚拟声卡（译音档），一键切换。
 
@@ -186,6 +188,9 @@ class MicProxy:
         #: （日志实证：9~10 次/5s 只在启动窗口出现，稳态为 0）。见 `_prime_ring`。
         self._got_mic_data = False
         self._sink = TranslatedSink(self)
+        # ---- 耳返（见 vlt/output/earmonitor.py）----
+        self._monitor_cfg: dict = dict(self._audio_cfg.get("monitor") or {})
+        self._monitor: EarMonitor | None = None
 
         # ---- 译音音量匹配（见 vlt/output/level_match.py）----
         # 麦克风「说话电平」参考**复用 `_mic_pump` 已经在读的那些块**，不再开第二个采集
@@ -268,6 +273,7 @@ class MicProxy:
             self._stop_mic_thread()
             return False
         self._opened = True
+        self._start_monitor()
         return True
 
     def _start_mic_thread(self) -> None:
@@ -310,13 +316,54 @@ class MicProxy:
         if th is not None and th.is_alive():
             th.join(timeout=2.0)
         self._thread = None
+        if self._monitor is not None:
+            self._monitor.close()
+            self._monitor = None
         if self._out_stream is not None:
-            try:
-                self._out_stream.stop()
-                self._out_stream.close()
-            except Exception:              # noqa: BLE001
-                pass
-            self._out_stream = None
+            self._close_out_stream()
+
+    # ------------------------------------------------------------------ 耳返
+    @property
+    def monitor(self) -> EarMonitor | None:
+        """当前耳返实例（未启用 / 打开失败时为 None）。"""
+        return self._monitor
+
+    def _start_monitor(self) -> None:
+        """按配置开耳返。失败只禁用耳返，绝不影响代理本身。"""
+        cfg = self._monitor_cfg or {}
+        if not cfg.get("enabled"):
+            return
+        mon = EarMonitor(device_name=str(cfg.get("device_name") or ""),
+                         volume=cfg.get("volume", 70.0),
+                         on_status=self._on_status)
+        if mon.open():
+            self._monitor = mon
+        else:
+            self._monitor = None
+
+    def _monitor_push(self, pcm_48k_stereo: bytes) -> None:
+        mon = self._monitor
+        if mon is not None:
+            mon.push(pcm_48k_stereo)
+
+    def set_monitor_volume(self, volume: float) -> None:
+        """界面拖音量：立刻生效（缓冲里的旧音频也按新音量放）。"""
+        if self._monitor is not None:
+            self._monitor.set_volume(volume)
+
+    def restart_monitor(self, *, enabled: bool, device_name: str,
+                        volume: float) -> bool:
+        """界面改「耳返开关 / 设备」：热重开这一路（不动虚拟声卡与麦克风）。"""
+        if self._monitor is not None:
+            self._monitor.close()
+            self._monitor = None
+        self._monitor_cfg = {"enabled": bool(enabled),
+                             "device_name": str(device_name or ""),
+                             "volume": float(volume)}
+        self._audio_cfg["monitor"] = self._monitor_cfg
+        if enabled and self._opened:
+            self._start_monitor()
+        return self._monitor is not None
 
     # ------------------------------------------------------------------ 输出设备
     def _pick_output_device(self):
@@ -385,13 +432,77 @@ class MicProxy:
                         err=last_exc)
         return False
 
+    @property
+    def out_device_name(self) -> str:
+        """当前正在用的输出设备名（未打开时为空）。界面「译音输出=…」那行取的就是它。"""
+        return self._out_device[1] if self._out_device else ""
+
+    def _close_out_stream(self) -> None:
+        """关掉当前输出流（幂等、绝不抛）。"""
+        if self._out_stream is None:
+            return
+        try:
+            self._out_stream.stop()
+            self._out_stream.close()
+        except Exception:                  # noqa: BLE001
+            pass
+        self._out_stream = None
+        self._out_device = None
+
+    def reopen_output(self, device_name: str | None) -> bool:
+        """切换**译音输出**（虚拟声卡）设备 —— 设置页改设备后调这里（issue #111）。
+
+        为什么需要它：输出设备只在 `start()` 时解析一次，而设置页改「译音输出」只写
+        配置。不重开的话配置/界面都变了、声音还留在旧端点，用户只能重启程序，且界面
+        上没有任何提示。
+
+        只动输出流：麦克风采集线程与引擎手里的 `translated_sink` 都不受影响
+        （sink 是鸭子代理，`push` 转发到同一个代理实例）。失败时**换回旧端点**并返回
+        False，由调用方状态栏 + 日志各留一条（禁静默降级）。
+        """
+        new_name = device_name or ""
+        old = self._out_device
+        if not self._opened:
+            self._audio_cfg["device_name"] = new_name
+            return False                   # 没启动：配置即生效，下次 start() 用新设备
+        self._audio_cfg["device_name"] = new_name
+        picked = self._pick_output_device()
+        if picked is None:
+            self._on_status("warn", "[proxy] 切换译音输出失败：找不到设备 {dev}（保持旧端点）",
+                            dev=repr(new_name))
+            return False
+        idx, name, _rate, fallbacks = picked
+        if old is not None and old[0] == idx:
+            return True                    # 同一个设备：不重开（避免无谓静音）
+        self._close_out_stream()
+        if self._open_output(idx, name, fallbacks):
+            return True
+        if old is not None:                # 新设备打不开 → 换回旧端点
+            self._open_output(old[0], old[1], [])
+        return False
+
+    def _drain_translated(self, need: int) -> bytes:
+        """取一块「进游戏」的译音数据，并**同时**送给耳返 —— 唯一的耳返 tap 点。
+
+        为什么在这里而不是 `TranslatedSink.push()`：push 是 TTS 突发到达的入口，
+        一个 delta 常有几百 ms，一次性灌进只有 120ms 容量的监听缓冲会把**正在播的
+        句子截断**（真机症状：「上一句还没播完就开始播下一句」，而游戏那一路是对的）。
+        从播放侧 tap，耳返拿到的就是**实际发给虚拟声卡的那批字节、同一条时间轴**。
+
+        未起播 / 数据不足 → 补静音（既有语义），此时**不喂**耳返（别把静音堆进
+        监听缓冲，那只会让耳返凭空多出一段延迟）。
+        """
+        data = self._translated.drain_block(need, self._monitor_push) if self._translated is not None else None
+        if data is None:
+            return b"\x00" * need
+        return data
+
     def _out_callback(self, outdata: bytearray, frames: int, time_info, status) -> None:
         need = frames * 2 * 2
         if status:
             pass
         if self._mode == MODE_TRANSLATED and self._translated is not None:
-            data = self._translated.drain_block(need)
-            outdata[:] = (b"\x00" * need) if data is None else data
+            outdata[:] = self._drain_translated(need)
             return
         data, under = self._ring.drain(need)
         outdata[:] = data

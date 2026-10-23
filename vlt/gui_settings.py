@@ -38,6 +38,7 @@ from .engine import (
     input_gate_settings,
 )
 from .i18n import t
+from .gui_audio import loopback_mode_label
 from .paths import APP_DIR
 from .ui_state import current_key_slot, provider
 from .ui_text import _persist_provider, _provider_choices
@@ -515,6 +516,28 @@ def signup_url(gui) -> str:
 
 # ================================================================ 音频页
 
+def sync_monitor_controls(gui) -> None:
+    """主界面「耳返」开关 → 设置页「耳返音量 / 耳返输出」的可用态。
+
+    开关本体在主界面（`gui._monitor_var`，唯一那个变量）；这里只负责灰化，避免出现
+    「主界面明明是关的，设置页还能拖音量」这种两处状态打架的观感。
+    控件还没建出来（headless / 本机没有该页）时两个都是 `None` → 什么都不做。
+    """
+    en = bool(gui._monitor_var.get()) if getattr(gui, "_monitor_var", None) is not None else False
+    vol = getattr(gui, "_monitor_vol", None)
+    combo = getattr(gui, "_monitor_combo", None)
+    if vol is not None:
+        try:
+            vol.configure(state="normal" if en else "disabled")
+        except Exception:                     # noqa: BLE001 — 纯外观，失败不挡流程
+            pass
+    if combo is not None:
+        try:
+            combo.configure(state="readonly" if en else "disabled")
+        except Exception:                     # noqa: BLE001
+            pass
+
+
 def build_settings_audio(gui, body: ttk.Frame) -> None:
     """「音频」页：设备选择 → 输入门限 → 译音音色。"""
     from .voices import REALTIME_VOICES, TTS_VOICES, voice_choices
@@ -535,11 +558,16 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
     gui._mic_combo = ttk.Combobox(grid, values=[auto], state="readonly")
     gui._loopback_combo = None
     gui._audio_out_combo = None
+    gui._loopback_mode_combo = None
     rows = [(t("麦克风:"), gui._mic_combo)]
     if not gui._linux_fixed_audio:
         gui._loopback_combo = ttk.Combobox(grid, values=[auto], state="readonly")
         gui._audio_out_combo = ttk.Combobox(grid, values=[auto], state="readonly")
+        gui._loopback_mode_combo = ttk.Combobox(
+            grid, state="readonly",
+            values=[t("端点混音（含其它应用）"), t("只抓 VRChat（进程）")])
         rows += [(t("VRChat 音频:"), gui._loopback_combo),
+                 (t("采集方式:"), gui._loopback_mode_combo),
                  (t("译音输出:"), gui._audio_out_combo)]
     for i, (label, combo) in enumerate(rows):
         ttk.Label(grid, text=label, style="Dim.TLabel").grid(
@@ -554,6 +582,11 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
     if not gui._linux_fixed_audio:
         gui._loopback_combo.set(capture_cfg.get("loopback_device") or auto)
         gui._audio_out_combo.set(audio_cfg.get("device_name") or auto)
+        mode = str(capture_cfg.get("loopback_mode") or "endpoint")
+        gui._loopback_mode_combo.set(loopback_mode_label(mode))
+        if mode == "process":
+            # 进程模式只抓 VRChat，端点下拉没有意义；值保留，方便切回来
+            gui._loopback_combo.configure(state="disabled")
 
     if gui._linux_fixed_audio:
         ttk.Label(body, text=t("Linux：VRChat 音频与译音输出已自动处理"),
@@ -563,6 +596,43 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
         ttk.Label(body, text=t("设备选择自动保存到 config.yaml"),
                   style="Muted.TLabel", justify=tk.LEFT,
                   wraplength=SETTINGS_WRAP).pack(anchor=tk.W, pady=(6, 0))
+
+    # ---- 耳返（两端都建）：开关在主界面（输出行），这里只留 输出设备 + 音量 ----
+    # ⚠️ 开关的 BooleanVar 由主界面 `build_output_row` 创建（`gui._monitor_var`），这里**不再新建**
+    #    —— 两个 BooleanVar 各存一份状态，会出现「主界面勾了、设置页以为没开」。
+    gui._monitor_combo = None
+    gui._monitor_vol = None
+    gui._monitor_vol_lbl = None
+    gui._monitor_vol_var = None
+    mon_cfg = audio_cfg.get("monitor") or {}
+    head = ttk.Frame(body)
+    head.pack(fill=tk.X, pady=(10, 0))
+    ttk.Label(head, text=t("耳返音量:"), style="Dim.TLabel").pack(side=tk.LEFT, padx=(0, 4))
+    gui._monitor_vol_var = tk.DoubleVar(
+        master=body, value=float(mon_cfg.get("volume", 70) or 70))
+    gui._monitor_vol = tk.Scale(
+        head, from_=0, to=100, resolution=1, orient=tk.HORIZONTAL, length=130,
+        variable=gui._monitor_vol_var, command=gui._on_monitor_volume,
+        **_ui_tk.slider_kwargs())
+    gui._monitor_vol.pack(side=tk.LEFT)
+    gui._monitor_vol_lbl = ttk.Label(
+        head, text=f"{float(mon_cfg.get('volume', 70) or 70):.0f}%",
+        style="Dim.TLabel", width=5)
+    gui._monitor_vol_lbl.pack(side=tk.LEFT, padx=(6, 0))
+
+    row = ttk.Frame(body)
+    row.pack(fill=tk.X, pady=(4, 0))
+    ttk.Label(row, text=t("耳返输出:"), style="Dim.TLabel").pack(side=tk.LEFT)
+    gui._monitor_combo = ttk.Combobox(row, values=[auto], state="readonly")
+    gui._monitor_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+    gui._monitor_combo.set(mon_cfg.get("device_name") or auto)
+    gui._monitor_combo.bind("<<ComboboxSelected>>", lambda e: gui._on_monitor_change())
+    if not gui._linux_fixed_audio:
+        # Linux 的采集固定只抓 VRChat 应用流，没有「同设备自动改 process」这一步。
+        ttk.Label(body, text=t("耳返会同时放给你自己听；与 VRChat 音频同设备时采集会自动改为只抓 VRChat"),
+                  style="Muted.TLabel", justify=tk.LEFT, wraplength=SETTINGS_WRAP).pack(
+                      anchor=tk.W, pady=(4, 0))
+    sync_monitor_controls(gui)
 
     # ---- 麦克风代理（**两端都建**：Windows 走 PortAudio 输出流，Linux 走 pw-cat 管道 +
     #      运行时声明的虚拟麦。语义完全一致，见 vlt/output/micproxy*.py 的模块头）----
@@ -723,10 +793,9 @@ def build_settings_audio(gui, body: ttk.Frame) -> None:
         row=1, column=0, sticky="w", pady=3)
     gui._gate_scale = tk.Scale(
         ggrid, from_=INPUT_GATE_MIN_DB, to=INPUT_GATE_MAX_DB, resolution=1,
-        orient=tk.HORIZONTAL, variable=gui._gate_var, showvalue=False, length=320,
-        bg=PANEL, fg=TEXT, troughcolor=SURFACE, activebackground=ACCENT,
-        highlightthickness=0, bd=0, sliderrelief=tk.FLAT,
-        command=lambda _v: gui._on_gate_change())
+        orient=tk.HORIZONTAL, variable=gui._gate_var, length=320,
+        command=lambda _v: gui._on_gate_change(),
+        **_ui_tk.slider_kwargs())
     gui._gate_scale.grid(row=1, column=1, sticky="w", padx=(8, 6), pady=3)
     gui._gate_val_lbl = ttk.Label(ggrid, text=f"{_gate_db:g} dB",
                                   style="Dim.TLabel", width=9)

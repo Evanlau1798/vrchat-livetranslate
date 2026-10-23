@@ -16,6 +16,11 @@
 到 **[Releases](https://github.com/nixi-agent/vrchat-livetranslate/releases/latest)** 下载
 `VRChatLiveTranslate.exe`（**单文件、免安装、无控制台窗口**），双击即用。
 
+> 🌏 **大陆网络打不开 GitHub 时**，直接下这两个直链（本项目自己的 CDN，不用连 GitHub）：
+> - Windows：<https://dl.kcm-nixi.cn/VRChatLiveTranslate.exe>
+> - Linux：<https://dl.kcm-nixi.cn/VRChatLiveTranslate-x86_64.AppImage>
+> - 校验值：<https://dl.kcm-nixi.cn/SHA256SUMS.txt>（**exe 与 AppImage 各一行**；`certutil -hashfile <文件> SHA256` 可自查）
+
 - 仍然要自备一个**千问云 API key**：界面里的「⚙ 设置」粘贴保存
 - 配置与日志写在 `%APPDATA%\vrchat-livetranslate`（exe 放在只读目录也能跑）
 - 想做成绿色版（配置跟着 exe 走）→ 在 exe 旁边放一个**空的 `portable.txt`**
@@ -32,6 +37,9 @@
   - **下次再说** → 这次不弹了，下次启动再看
   - **不再提示这个版本** → 跳过这个版本，出更新的再告诉你
 - 下载失败 → 可以重试，也可以点窗口里的「打开下载页自己下」去 Releases 页手动下
+- **更新从哪来**：检查新版本与下载都走本项目自己的 CDN（`dl.kcm-nixi.cn`，架在 Cloudflare R2 上），
+  **不需要连 GitHub** —— 大陆网络下这是它能稳定收到更新的原因。万一这个主源不可用，会自动回落到
+  GitHub Releases 取（两个源都拿不到时才会提示「检查失败」）；下载中途断了也会自动换备用源重试一次
 - 想在没弹窗的时候看看有没有新版 → 「⚙ 设置 → 软件更新 → 检查更新」
 - 更新**不会动你的配置和 API key**；更新成功后下次启动会告诉你一声
 
@@ -681,7 +689,10 @@ Nekoya=猫屋
 | `[overlay] ⚠️ SteamVR 未运行或不可用` | 正常降级：只有手腕屏不显示，chatbox 不受影响 |
 | 手腕屏看不见 | 先确认 SteamVR 在跑；再调「设置 → 手腕屏」里的位置 / 大小；`--overlay-dry-run` 能出 PNG 说明渲染没问题 |
 | 手腕屏过一阵子消失 | 已带两级自愈（连续 3 次失败重建 overlay → 再 3 次失败硬重启 openvr 连接 → 之后每 50 次重试一次）。日志每 30s 有一条 `[overlay][diag] 心跳：…` 可以看「最后成功上传多久前 / 重建次数」 |
+| 手腕屏 / 桌面字幕里**韩文**（或泰文）显示成一排方框 | 这两门书写系统的字形不在默认的中日韩字体里（实测雅黑渲染 `안녕하세요` / `สวัสดี` 得到的正是方块）。程序会**先看主字体能不能画**：能画就不换（Linux 上 Noto Sans CJK 这类字体自带韩文，换了反而变成另一个字重）；画不出才另找一份（韩文 `malgun.ttf`、泰文 `LeelawUI.ttf`），一份都找不到时日志会打一行「找不到含…字形的字体」（只打一次）。**窗口界面里的同一段文字正常、只有贴图是方框**属正常现象：界面走 Tk 的字形回退，贴图渲染不做回退 | 正常情况下无需处理；日志里出现那行提示时才需要动手——装一份对应字体（韩文：Malgun Gothic；泰文：Leelawadee UI）后重开程序 |
 | 译音输出没声音 | ①两个开关都要开（输出勾选 + 方向级）；②只对「我说的话」方向有效；③虚拟声卡装了吗、状态栏/日志会明说原因；④**其余功能不受影响** |
+| 「别人说话」里混进音乐 / 浏览器 / 系统提示音 | 端点模式的正常表现（抓的是整个输出端口的混音）。设置 → 音频 → **采集方式** → 选「只抓 VRChat（进程）」就只抓游戏音频（Win10 21H2+）。VRChat 没启动时这条腿会等待，属正常；切回「端点混音」即恢复旧行为（下次开始翻译生效） |
+| 想听到自己的译音（耳返） | **主界面「输出」行勾「耳返」**（开关在这里，日常会开关）；音量与「耳返输出」（建议耳机）在 设置 → 音频。与 VRChat 音频同一个设备时，开始翻译会把采集自动改成「只抓 VRChat（进程）」，以免把自己的译音再翻一遍；系统不支持时耳返会被自动关掉并提示 |
 | 界面「开始翻译」点了没反应 | 先看终端输出——asyncio 回调里的异常只在控制台打一行 traceback，不进状态栏（用 exe 的话看 `logs/` 里最新的那个 `.log`） |
 | 报错看不懂 | **「⚙ 设置 → 导出日志压缩包」**，已自动脱敏，把 zip 发给维护者即可 |
 
@@ -718,7 +729,7 @@ vlt/
 server/                   多人房间的服务端（Cloudflare Worker + Durable Object，独立部署）
 scripts/                  探针与调试工具（probe_* / osc_listen / verify_release / room_e2e_local）
                           + run_tests.py 测试运行器 + verify/ 真机验收脚本（需真桌面/真硬件，不进 CI）
-tests/                    95 个文件、718 个测试函数（离线可跑，CI 逐文件执行；
+tests/                    101 个文件、785 个测试函数（离线可跑，CI 逐文件执行；
                           不含需要真 API key 的 tests/test_engine.py）
 docs/                     P0.5 / P1 / P2 三份实测结果（协议、延迟、手腕屏）
 testdata/                 自带测试音频（中文 8.56s、英文 7.92s，16kHz 单声道 PCM）
@@ -779,12 +790,14 @@ build_exe.bat                                              :: 打包 + 打完自
   （顺带累积覆盖率，末尾打印摘要，**不设阈值、不阻断**）→ 再单独验一次**打包链路**（产物存在且 ≥20MB）
 - **Release**（`.github/workflows/release.yml`，推 `v*` tag 触发）：
   先对账 tag 与 `vlt/__init__.py` 的 `__version__`（不一致直接失败）→ 打包 **exe 与 Linux AppImage** →
-  建 Release，附件是 **exe**、**`VRChatLiveTranslate-x86_64.AppImage`** 与 `SHA256SUMS.txt`：校验值 GitHub 会在附件旁直接显示 `sha256:…`，而那份摘要文件是过渡期给 **v0.2.0 及更早客户端**用的（它们只认这个附件，缺了会静默查不到更新）
+  **覆盖式发布到 Cloudflare R2**（`dl.kcm-nixi.cn`：客户端「检查更新 / 立即更新」的主源；传完会走公开域名
+  把两份产物整份下回来逐字节复核，复核不过就整体红、不建 Release）→
+  建 Release，附件是 **exe**、**`VRChatLiveTranslate-x86_64.AppImage`** 与 `SHA256SUMS.txt`：校验值 GitHub 会在附件旁直接显示 `sha256:…`，而那份摘要文件是**给用户核校验值用的**（exe 与 AppImage 各一行；发布脚本会拿它跟真实产物逐个对账，对不上就不许发版）
 - **下载后想自己复核**：`scripts/verify_release.py` 会把 Release 附件拉下来对账
   （SHA256、真跑 `--self-test`、版本行、字节码里搜新功能字符串、图标像素比对）：
 
   ```bat
-  .venv\Scripts\python.exe scripts\verify_release.py v0.11.2 "_maybe_apply_anchor,CTX_FLUSH,_write_proxy_leaves,_yaml_set_or_create_checked"
+  .venv\Scripts\python.exe scripts\verify_release.py v0.12.0 "_drain_translated,process_loopback_available,monitor_capture_conflict,apply_ear_monitor_policy,sync_monitor_controls,_open_pwcat,slider_kwargs"
   ```
 
 ---

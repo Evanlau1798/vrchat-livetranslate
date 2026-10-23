@@ -76,13 +76,13 @@ class _TranslatedBuffer(VirtualMic):
     def open(self) -> bool:              # buffer-only：父类会开流，这里禁掉
         return True
 
-    def drain_block(self, need_bytes: int) -> bytes | None:
+    def drain_block(self, need_bytes: int, on_chunk=None) -> bytes | None:
         """取一块译音数据，尾块补静音；未起播/无数据返回 None。"""
         with self._lock:
             self._maybe_prime()
             if not self._can_drain(need_bytes) or self._buf_bytes == 0:
                 return None
-            return self._drain(need_bytes)
+            return self._drain(need_bytes, on_chunk)
 
     def reset(self) -> None:
         """清空缓冲并复位起播状态（切换档位时用：切过去立刻是新内容，不念旧账）。"""

@@ -47,6 +47,11 @@ class AudioCtx:
     mic_combo: Any = None                   # ttk.Combobox
     loopback_combo: Any = None              # ttk.Combobox
     audio_out_combo: Any = None             # ttk.Combobox
+    loopback_mode_combo: Any = None         # ttk.Combobox（端点混音 / 只抓 VRChat）
+    monitor_combo: Any = None               # ttk.Combobox（耳返输出设备）
+    monitor_var: Any = None                 # tk.BooleanVar（启用耳返）
+    monitor_vol_var: Any = None             # tk.DoubleVar（0-100）
+    monitor_vol_lbl: Any = None             # ttk.Label（xx%）
     linux_fixed_audio: bool = False
 
     # ── 门限控件 ──
@@ -68,7 +73,9 @@ class AudioCtx:
 def sync_from_gui(ctx: AudioCtx, gui) -> None:
     """从 gui 实例同步控件引用和回调到 AudioCtx。"""
     c = ctx; g = getattr
-    for n in ("mic_combo", "loopback_combo", "audio_out_combo", "gate_var", "gate_enabled_var",
+    for n in ("mic_combo", "loopback_combo", "audio_out_combo", "loopback_mode_combo",
+              "monitor_combo", "monitor_var", "monitor_vol_var", "monitor_vol_lbl",
+              "gate_var", "gate_enabled_var",
               "gate_val_lbl", "gate_level_canvas", "gate_level_lbl"):
         setattr(c, n, g(gui, f"_{n}", None))
     c.linux_fixed_audio = g(gui, '_linux_fixed_audio', False)
@@ -100,7 +107,8 @@ def start_device_scan(ctx: AudioCtx, root: tk.Misc, headless: bool,
         root.update_idletasks()
         mics = enumerate_mic_devices()
         loops = [] if ctx.linux_fixed_audio else enumerate_loopback_devices()
-        outs = [] if ctx.linux_fixed_audio else enumerate_audio_out_devices()
+        # Linux 也要枚举输出：耳返的输出下拉在两端都有（译音输出不需要选）。
+        outs = enumerate_audio_out_devices()
         on_device_scan_result(ctx, cfg=cfg, mics=mics, loops=loops, outs=outs,
                               names_holder=scan_holder.get("names", {}),
                               scan_holder=scan_holder)
@@ -148,13 +156,17 @@ def on_device_scan_result(ctx: AudioCtx, cfg, mics, loops, outs,
     names_holder["out"] = []
     out_display = [auto]
     for info in outs:
-        names_holder["out"].append(info.name)
+        # Linux 存 PipeWire `node.name`（稳定标识），Windows 存 PortAudio 设备名。
+        names_holder["out"].append(
+            (info.node_name or info.name) if ctx.linux_fixed_audio else info.name)
         out_display.append(format_device_display(info))
 
     ctx.mic_combo.configure(values=mic_display)
     if not ctx.linux_fixed_audio:
         ctx.loopback_combo.configure(values=loop_display)
         ctx.audio_out_combo.configure(values=out_display)
+    if ctx.monitor_combo is not None:
+        ctx.monitor_combo.configure(values=out_display)
 
     # 恢复配置里的选择（如果设备在列表里）
     capture_cfg = {}
@@ -191,6 +203,14 @@ def on_device_scan_result(ctx: AudioCtx, cfg, mics, loops, outs,
         else:
             ctx.audio_out_combo.set(auto)
 
+    if ctx.monitor_combo is not None:
+        mon_name = str((audio_cfg.get("monitor") or {}).get("device_name") or "")
+        if mon_name and mon_name in names_holder["out"]:
+            ctx.monitor_combo.set(
+                out_display[names_holder["out"].index(mon_name) + 1])
+        else:
+            ctx.monitor_combo.set(auto)
+
     if not mics and not loops and not outs:
         if ctx.set_status_fn:
             ctx.set_status_fn("warn", t("未扫描到设备（远程会话下枚举为空是正常的）"))
@@ -205,6 +225,54 @@ def on_device_scan_result(ctx: AudioCtx, cfg, mics, loops, outs,
                   m=len(mics), l=len(loops), o=len(outs)))
     if scan_holder is not None:
         scan_holder["pending"] = False
+
+
+def loopback_mode_label(mode: str) -> str:
+    """把配置里的 `capture.loopback_mode` 翻成下拉项文案。"""
+    return t("只抓 VRChat（进程）") if mode == "process" else t("端点混音（含其它应用）")
+
+
+def loopback_mode_key(label: str) -> str:
+    """下拉项文案 → 配置值（认不出来就当 endpoint，绝不静默写成 process）。"""
+    return "process" if label == t("只抓 VRChat（进程）") else "endpoint"
+
+
+def monitor_device_from_combo(combo, names_holder: dict) -> str:
+    """耳返下拉 → 配置里的设备名（「自动检测」= 空串）。"""
+    if combo is None:
+        return ""
+    text = combo.get()
+    auto = t("自动检测")
+    if not text or text == auto:
+        return ""
+    display_list = combo_values(combo)
+    idx = display_list.index(text) if text in display_list else -1
+    if idx > 0 and idx - 1 < len(names_holder.get("out", [])):
+        return names_holder["out"][idx - 1]
+    return ""
+
+
+def save_monitor_config(ctx: AudioCtx, cfg, enabled: bool, device: str,
+                        volume: float) -> None:
+    """耳返三项写回 `output.audio.monitor.*`（就地改，不整份重写）。"""
+    p = _config_mod.DEFAULT_CONFIG
+    if not p.exists():
+        return
+    try:
+        text = p.read_text(encoding="utf-8")
+        for key_path, val in (
+            (["output", "audio", "monitor", "enabled"], _fmt_scalar(bool(enabled))),
+            (["output", "audio", "monitor", "device_name"], _yaml_scalar(device)),
+            (["output", "audio", "monitor", "volume"], _fmt_scalar(float(volume))),
+        ):
+            text = _yaml_set_or_create(text, key_path, val)
+        _write_config_text(p, text)
+    except Exception as exc:                         # noqa: BLE001
+        print(f"[gui] 保存耳返配置失败：{exc}", flush=True)
+        return
+    if cfg is not None:
+        cfg.output.setdefault("audio", {}).setdefault("monitor", {}).update(
+            {"enabled": bool(enabled), "device_name": device, "volume": float(volume)})
 
 
 def on_device_change(ctx: AudioCtx, cfg, names_holder: dict) -> None:
@@ -236,20 +304,35 @@ def on_device_change(ctx: AudioCtx, cfg, names_holder: dict) -> None:
             if idx > 0 and idx - 1 < len(names_holder["out"]):
                 out_name = names_holder["out"][idx - 1]
 
-    save_device_config(ctx, cfg, mic_name, loop_name, out_name)
-    picked = [n for n in (mic_name, loop_name, out_name) if n]
+    # 采集方式（端点混音 / 只抓 VRChat）。进程模式下「VRChat 音频」端点没有意义 →
+    # 置灰但**保留原值**（切回来时用户的选择还在）。
+    mode: str | None = None
+    if not ctx.linux_fixed_audio:
+        if ctx.loopback_mode_combo is not None:
+            mode = loopback_mode_key(ctx.loopback_mode_combo.get())
+        if ctx.loopback_combo is not None:
+            ctx.loopback_combo.configure(
+                state="disabled" if mode == "process" else "readonly")
+
+    save_device_config(ctx, cfg, mic_name, loop_name, out_name, mode)
+    picked = [n for n in (mic_name, loop_name, out_name) if n and mode != "process"]
     if ctx.set_status_fn:
-        if picked:
+        if mode == "process":
+            ctx.set_status_fn("info",
+                              t("采集方式：{mode}", mode=t("只抓 VRChat（进程）")))
+        elif picked:
             ctx.set_status_fn("info", t("已选设备：{names}", names=" | ".join(picked)))
         else:
             ctx.set_status_fn("info", t("设备：全部自动检测"))
 
 
 def save_device_config(ctx: AudioCtx, cfg,
-                       mic_name: str, loop_name: str, out_name: str) -> None:
+                       mic_name: str, loop_name: str, out_name: str,
+                       loopback_mode: str | None = None) -> None:
     """把设备选择写回 config.yaml —— **就地改那几行**，不整份重写。
 
     Linux：只写麦克风。``loopback_device`` / ``output.audio.device_name`` 原样保留。
+    `loopback_mode` 为 None 时不动那一行（设备扫描迁移等调用点不需要改它）。
     """
     write_fixed = not ctx.linux_fixed_audio
     p = _config_mod.DEFAULT_CONFIG
@@ -263,6 +346,8 @@ def save_device_config(ctx: AudioCtx, cfg,
         if write_fixed:
             updates.append((["capture", "loopback_device"], _yaml_scalar(loop_name)))
             updates.append((["output", "audio", "device_name"], _yaml_scalar(out_name)))
+            if loopback_mode is not None:
+                updates.append((["capture", "loopback_mode"], _yaml_scalar(loopback_mode)))
         for key_path, val in updates:
             text = _yaml_set_or_create(text, key_path, val)
         _write_config_text(p, text)
@@ -274,6 +359,8 @@ def save_device_config(ctx: AudioCtx, cfg,
         if write_fixed:
             cfg.output["capture"]["loopback_device"] = loop_name
             cfg.output.setdefault("audio", {})["device_name"] = out_name
+            if loopback_mode is not None:
+                cfg.output["capture"]["loopback_mode"] = loopback_mode
 
 
 # ================================================================ 输入门限
