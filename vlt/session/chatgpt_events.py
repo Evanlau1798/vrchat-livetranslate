@@ -155,6 +155,41 @@ def response_text(raw, expected_model=None):
         _invalid()
 
 
+def _moderation_metadata(event, response_id):
+    if (set(event) != {'type', 'response_id', 'sequence_number', 'metadata'}
+            or event['response_id'] != response_id or not isinstance(event['metadata'], dict)
+            or set(event['metadata']) != {'openai_chatgpt_moderation_metadata'}):
+        _invalid()
+    metadata = event['metadata']['openai_chatgpt_moderation_metadata']
+    if (not isinstance(metadata, dict) or set(metadata) != {'prompt', 'generation', 'tool_call', 'tool_response'}
+            or metadata['tool_call'] != {} or metadata['tool_response'] != {}):
+        _invalid()
+    for phase in ('prompt', 'generation'):
+        value = metadata[phase]
+        if not isinstance(value, dict):
+            _invalid()
+        if value == {}:
+            continue
+        if set(value) != {'omnimod'} or not isinstance(value['omnimod'], dict):
+            _invalid()
+        moderation = value['omnimod']
+        if (set(moderation) != {'protection_type', 'outputs'} or moderation['protection_type'] != 'omnimod'
+                or not isinstance(moderation['outputs'], list) or not 1 <= len(moderation['outputs']) <= 32):
+            _invalid()
+        for output in moderation['outputs']:
+            if (not isinstance(output, dict) or set(output) != {'results', 'is_blocked'}
+                    or output['is_blocked'] is not False or not isinstance(output['results'], list)
+                    or not 1 <= len(output['results']) <= 32):
+                _invalid()
+            for result in output['results']:
+                if not isinstance(result, dict) or set(result) != {'category_flags'}:
+                    _invalid()
+                flags = result['category_flags']
+                if (not isinstance(flags, dict) or not 1 <= len(flags) <= 128
+                        or any(type(flag) is not bool for flag in flags.values())):
+                    _invalid()
+
+
 def _response_text(raw, expected_model):
     if not isinstance(raw, bytes) or not raw or len(raw) > 256000:
         _invalid()
@@ -203,6 +238,8 @@ def _response_text(raw, expected_model):
         if kind == 'response.in_progress':
             if event.get('response', {}).get('id') != response_id:
                 _invalid()
+        elif kind == 'response.metadata':
+            _moderation_metadata(event, response_id)
         elif kind in ('response.output_item.added', 'response.output_item.done'):
             item = event.get('item')
             item_id = _checked_item(item)

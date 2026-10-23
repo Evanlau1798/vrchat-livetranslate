@@ -160,9 +160,7 @@ class NativeVoice:
             session = {'model': 'gpt-live-1-codex',
                 'instructions': _READ_JA if target == 'ja' else _READ.format(target=target),
                 'audio': {'output': {'voice': 'juniper'}},
-                'delegation': {'type': 'client', 'ack_filler': False},
-                'initial_items': [{'type': 'message', 'role': 'user', 'content': [{'type': 'input_text',
-                    'text': json.dumps({'script': text}, ensure_ascii=False)}]}]}
+                'delegation': {'type': 'client', 'ack_filler': False}}
             answer, url = await self.relay._request('live', json.dumps({'sdp': sdp, 'session': session},
                 ensure_ascii=False).encode(), {'Content-Type': 'application/json',
                 'originator': 'codex_cli_rs', 'openai-alpha': 'quicksilver=v2'})
@@ -195,6 +193,15 @@ class NativeVoice:
                 self.bridge = _Bridge(offer, lambda _: self._fail(), self._receive)
                 await self.bridge.start(self.profile.name)
                 self._check()
+                phase = 'context-append'
+                await self._wait(lambda: len(self.events.started) == 2)
+                self.events.request_context()
+                # Initial history does not start speech; send the approved script exactly once.
+                await self.socket.send(json.dumps({'type': 'session.context.append', 'channel': 'speakable',
+                    'content': [{'type': 'input_text', 'text': json.dumps({'script': text}, ensure_ascii=False)}]},
+                    ensure_ascii=False))
+                phase = 'context-ack'
+                await self._wait(lambda: self.events.context_acknowledged)
                 phase = 'turn-complete'
                 await self._wait(lambda: self.events.complete)
                 self.events.request_close()

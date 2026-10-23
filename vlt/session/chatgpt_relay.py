@@ -45,16 +45,47 @@ class SubscriptionRelay:
         return await self._transcribe(pcm, language, 16000, 30, SOURCE_LANGS.values())
 
     async def audio_asr(self, pcm, language):
+        if asyncio.current_task().cancelling():
+            raise asyncio.CancelledError()
         generation = self.owner.generation
-        transcripts = []
-        for _ in range(3):
-            if asyncio.current_task().cancelling():
-                raise asyncio.CancelledError()
-            if self.owner.generation != generation:
-                raise RuntimeError('asr-stale')
-            transcripts.append(await self._transcribe(pcm, language, 24000, 90, TARGET_LANGS.values()))
-            if self.owner.generation != generation:
-                raise RuntimeError('asr-stale')
+        failure = None
+
+        async def read():
+            nonlocal failure
+            if failure is not None:
+                raise failure
+            try:
+                if self.owner.generation != generation:
+                    raise RuntimeError('asr-stale')
+                transcript = await self._transcribe(pcm, language, 24000, 90, TARGET_LANGS.values())
+                if asyncio.current_task().cancelling():
+                    raise asyncio.CancelledError()
+                if self.owner.generation != generation:
+                    raise RuntimeError('asr-stale')
+                return transcript
+            except BaseException as exc:
+                failure = exc
+                raise
+
+        reads = [asyncio.create_task(read()) for _ in range(3)]
+        # All three verdict inputs and owned HTTP workers must finish, including after cancellation.
+        joined = asyncio.gather(*reads, return_exceptions=True)
+        cancelled = False
+        while not joined.done():
+            try:
+                await asyncio.shield(joined)
+            except asyncio.CancelledError:
+                cancelled = True
+                for task in reads:
+                    task.cancel()
+        if cancelled:
+            raise asyncio.CancelledError()
+        transcripts = joined.result()
+        for result in transcripts:
+            if isinstance(result, BaseException):
+                raise result
+        if self.owner.generation != generation:
+            raise RuntimeError('asr-stale')
         for transcript in transcripts:
             if transcripts.count(transcript) >= 2:
                 return transcript

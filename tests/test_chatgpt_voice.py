@@ -226,7 +226,10 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_close_on_one_channel_does_not_seal(self):
         import json
         from chatgpt_voice_fakes import wire
+        send = self.fixture.send
         async def only_primary(raw):
+            if json.loads(raw)['type'] == 'session.context.append':
+                return await send(raw)
             self.assertEqual(json.loads(raw)['type'], 'session.close')
             await self.fixture.bridge._receive_control(dict(type='live-event',
                 data=wire(self.fixture.closed_event).decode()))
@@ -287,7 +290,8 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         send = self.fixture.send
         async def change_account(raw):
             await send(raw)
-            self.owner.generation += 1
+            if json.loads(raw)['type'] == 'session.close':
+                self.owner.generation += 1
         self.fixture.send = change_account
         self.assertEqual(await self.run_section(), (False, [], []))
         self.relay.audio_asr.assert_not_awaited()
@@ -326,7 +330,8 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await self.run_section())[0])
         session = self.fixture.offer['session']
         self.assertEqual(session['model'], 'gpt-live-1-codex')
-        self.assertEqual(session['initial_items'][0]['content'][0]['text'],
+        self.assertNotIn('initial_items', session)
+        self.assertEqual(self.fixture.context['content'][0]['text'],
                          json.dumps({'script': attack}, ensure_ascii=False))
         self.assertEqual(session['delegation'], dict(type='client', ack_filler=False))
         self.assertEqual(self.fixture.steps.count('http'), 1)
@@ -342,9 +347,9 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 _, pcm = await NativeVoice(self.relay).generate(script, target)
                 session = self.fixture.offer['session']
                 self.assertEqual(pcm, PCM + TAIL)
-                self.assertEqual(len(session['initial_items']), 1)
-                self.assertEqual(session['initial_items'][0]['role'], 'user')
-                self.assertEqual(session['initial_items'][0]['content'], [{'type': 'input_text',
+                self.assertNotIn('initial_items', session)
+                self.assertEqual(self.fixture.context['channel'], 'speakable')
+                self.assertEqual(self.fixture.context['content'], [{'type': 'input_text',
                     'text': json.dumps({'script': script}, ensure_ascii=False)}])
                 self.assertNotIn(script, session['instructions'])
                 if target == 'ja':

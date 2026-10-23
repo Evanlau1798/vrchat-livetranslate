@@ -40,6 +40,7 @@ class NativeFixture:
         self.secondary = events()
         self.closed_event = dict(type='session.closed', reason='client_request', usage={})
         self.offer = None
+        self.context = None
         self.profile = None
         self.connect_args = None
 
@@ -51,7 +52,7 @@ class NativeFixture:
         assert answer.startswith('v=0')
         bridge.socket = SimpleNamespace(send=self.local_send)
         bridge._receive_audio(PCM)
-        for event in self.primary:
+        for event in self.primary[:1]:
             accepted = await bridge._receive_control(dict(type='live-event', data=wire(event).decode()))
             assert accepted is True
         bridge.ready.set()
@@ -74,7 +75,7 @@ class NativeFixture:
                 async def open_socket():
                     fixture.steps.append('sideband-connect')
                     assert args[0] == 'wss://api.openai.com/v1/live/call_1'
-                    for event in fixture.secondary:
+                    for event in fixture.secondary[:1]:
                         fixture.queue.put_nowait(wire(event))
                     return fixture
                 return open_socket().__await__()
@@ -85,12 +86,23 @@ class NativeFixture:
 
     async def __anext__(self):
         item = await self.queue.get()
+        await asyncio.sleep(0)
         if item is None:
             raise StopAsyncIteration()
         return item
 
     async def send(self, raw):
         event = json.loads(raw)
+        if event['type'] == 'session.context.append':
+            assert self.context is None, 'each candidate has one explicit speech request'
+            self.context = event
+            self.steps.append('context-append')
+            ack = dict(type='session.context.appended', start_ms=200, end_ms=400)
+            for message in [ack, *self.primary[1:]]:
+                await self.bridge._receive_control(dict(type='live-event', data=wire(message).decode()))
+            for message in [ack, *self.secondary[1:]]:
+                self.queue.put_nowait(wire(message))
+            return
         assert event['type'] == 'session.close'
         self.steps.append('native-close')
         await self.bridge._receive_control(dict(type='live-event', data=wire(self.closed_event).decode()))

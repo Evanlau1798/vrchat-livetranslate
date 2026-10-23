@@ -42,6 +42,8 @@ class VoiceEvents:
         self.closed = set()
         self.session_id = self.turn_id = None
         self.close_requested = False
+        self._context_requested = False
+        self._context_acks = {}
         self.invalid = False
         self._count = 0
         self._delta_bytes = {name: 0 for name in self.parsers}
@@ -51,8 +53,22 @@ class VoiceEvents:
         self._input_bytes = 0
 
     @property
+    def context_acknowledged(self):
+        return (not self.invalid and len(self._context_acks) == 2
+                and self._context_acks['primary'] == self._context_acks['sideband'])
+
+    def request_context(self):
+        if (self.invalid or self.close_requested or self._context_requested
+                or len(self.started) != 2 or self.turn_id is not None or self._items):
+            self.invalid = True
+            self.changed.set()
+            raise RuntimeError('voice-event')
+        self._context_requested = True
+
+    @property
     def complete(self):
-        return (not self.invalid and len(self.done) == 2 and self.done['primary'] == self.done['sideband'])
+        return (not self.invalid and len(self.done) == 2 and self.done['primary'] == self.done['sideband']
+                and (not self._context_requested or self.context_acknowledged))
 
     def request_close(self):
         if not self.complete or self.close_requested:
@@ -88,7 +104,17 @@ class VoiceEvents:
                 return result
             if channel not in self.started:
                 raise RuntimeError('voice-event')
+            if kind == 'session.context.appended':
+                _fields(event, ('type', 'start_ms', 'end_ms'))
+                if not self._context_requested or channel in self._context_acks or channel in self.done:
+                    raise RuntimeError('voice-event')
+                self._context_acks[channel] = _times(event)
+                if len(self._context_acks) == 2 and not self.context_acknowledged:
+                    raise RuntimeError('voice-event')
+                return RawEvent('context-ack', self.session_id)
             if kind in ('output_transcript.added', 'turn.created', 'turn.done'):
+                if self._context_requested and channel not in self._context_acks:
+                    raise RuntimeError('voice-event')
                 return self._transcript(event, raw, channel)
             if kind == 'turn.delta':
                 _fields(event, ('type', 'turn_id', 'delta', 'start_ms', 'end_ms'))

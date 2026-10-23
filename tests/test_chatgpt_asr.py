@@ -100,7 +100,7 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.cancelled())
         self.assertEqual(call.call_count, 1)
 
-    async def test_blind_audio_group_timeout_stops_before_the_third_read(self):
+    async def test_blind_audio_group_timeout_cancels_all_inflight_reads(self):
         from vlt.session.base import SessionConfig
         from vlt.session import chatgpt_pipeline as pipeline
 
@@ -111,15 +111,17 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
                                     pipeline._policy(cfg), pcm, pipeline._hash(pcm))
         cancelled = asyncio.Event()
         calls = 0
+        cancellations = 0
 
         async def slow_read(*args):
-            nonlocal calls
+            nonlocal calls, cancellations
             calls += 1
             if calls == 1:
                 return 'same'
             try:
                 await asyncio.Event().wait()
             finally:
+                cancellations += 1
                 cancelled.set()
 
         try:
@@ -127,7 +129,8 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(pipeline, '_STAGE_TIMEOUT', .02):
                 with self.assertRaisesRegex(pipeline._Rejected, '^audio-asr-timeout$'):
                     await coordinator._stage(section, 'audio-asr', self.asr.audio_asr, pcm, 'ja')
-            self.assertEqual(calls, 2)
+            self.assertEqual(calls, 3)
+            self.assertEqual(cancellations, 2)
             self.assertTrue(cancelled.is_set())
             self.assertFalse(coordinator.consume('mine', Mock(), Mock()))
         finally:
