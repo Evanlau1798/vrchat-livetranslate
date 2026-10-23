@@ -43,6 +43,11 @@ class SubscriptionRelay:
         self.owner = owner
 
     async def source_asr(self, pcm, language):
+        # Leading digital silence can change ASR words; keep every nonzero sample and the frozen source.
+        if isinstance(pcm, bytes) and 0 < len(pcm) <= 960000 and not len(pcm) % 2:
+            leading = (len(pcm) - len(pcm.lstrip(b'\0'))) // 2 * 2
+            if leading < len(pcm):
+                pcm = pcm[leading:]
         return await self._transcribe(pcm, language, 16000, 30, SOURCE_LANGS.values())
 
     async def audio_asr(self, pcm, language):

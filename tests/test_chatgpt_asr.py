@@ -24,7 +24,7 @@ class ASRTests(unittest.IsolatedAsyncioTestCase):
                                      credentials=AsyncMock(return_value=Credentials('fake-account', 'fake-access', 2)))
         self.asr = SubscriptionRelay(self.owner)
 
-    async def test_source_and_blind_audio_send_exact_full_pcm_and_only_language(self):
+    async def test_unpadded_source_and_blind_audio_send_exact_full_pcm_and_only_language(self):
         for operation, rate in ((self.asr.source_asr, 16000), (self.asr.audio_asr, 24000)):
             pcm = b'\x12\x00' * 768
             with patch('vlt.session.chatgpt_relay.request', return_value=b'{"text":"\u539f\u6587"}') as call:
