@@ -45,6 +45,7 @@ class VoiceEvents:
         self._context_requested = False
         self._context_acks = {}
         self.invalid = False
+        self.rejection = None
         self._count = 0
         self._delta_bytes = {name: 0 for name in self.parsers}
         self._item_bytes = {name: 0 for name in self.parsers}
@@ -78,6 +79,7 @@ class VoiceEvents:
         self.close_requested = True
 
     def consume(self, raw, channel):
+        kind = None
         try:
             if self.invalid or channel not in self.parsers:
                 raise RuntimeError('voice-event')
@@ -165,7 +167,16 @@ class VoiceEvents:
                 self.closed.add(channel)
                 return RawEvent('closed', self.session_id)
             raise RuntimeError('voice-event')
-        except Exception:
+        except Exception as error:
+            if self.rejection is None:
+                site = error.__traceback__
+                while site.tb_next is not None and site.tb_next.tb_frame.f_code.co_filename == _fields.__code__.co_filename:
+                    site = site.tb_next
+                label = kind if kind in ('session.started', 'session.context.appended',
+                    'output_transcript.added', 'turn.created', 'turn.done', 'turn.delta',
+                    'session.input_audio.append', 'session.output_audio.delta',
+                    'session.usage.updated', 'session.closed') else 'unknown'
+                self.rejection = f'{label}@{site.tb_frame.f_code.co_name}:{site.tb_lineno}'
             self.invalid = True
             raise RuntimeError('voice-event') from None
         finally:

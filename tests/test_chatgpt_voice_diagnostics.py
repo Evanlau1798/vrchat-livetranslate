@@ -54,6 +54,9 @@ class VoiceDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             connect = Mock(side_effect=boundary_errors[mode])
         elif mode == 'turn-complete':
             fixture.secondary.insert(1, dict(type='untrusted-event', payload='credential-test'))
+        elif mode == 'turn-shape':
+            fixture.secondary[2]['turn'] = dict(fixture.secondary[2]['turn'])
+            del fixture.secondary[2]['turn']['role']
         elif mode == 'websocket-close':
             close = fixture.close
             async def invalid_close():
@@ -102,6 +105,42 @@ class VoiceDiagnosticTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_voice_is_unchanged_and_quiet(self):
         self.assertEqual(await self.generate('normal'), '')
+
+    async def test_schema_failure_names_the_event_and_check_without_payloads(self):
+        log = await self.generate('turn-shape')
+        self.assertRegex(log, r'event=turn.created@_fields:\d+')
+        self.assertNotIn(TEXT, log)
+        self.assertNotIn('offline-token', log)
+        self.assertLess(len(log), 256)
+
+    async def test_unknown_event_name_is_redacted(self):
+        log = await self.generate('turn-complete')
+        self.assertRegex(log, r'event=unknown@consume:\d+')
+        self.assertNotIn('untrusted-event', log)
+        self.assertNotIn('credential-test', log)
+        self.assertLess(len(log), 256)
+
+    async def test_bundled_module_path_keeps_the_actual_check(self):
+        with patch('vlt.session.chatgpt_voice_events.__file__', '/bundle/voice_events.py'):
+            log = await self.generate('turn-shape')
+        self.assertRegex(log, r'event=turn.created@_fields:\d+')
+
+    async def test_first_invalid_payload_diagnostic_survives_later_events(self):
+        owner = SimpleNamespace(generation=0, require_usable=Mock())
+        voice = NativeVoice(SimpleNamespace(owner=owner))
+        voice._receive('{"type":"credential-test",', 'sideband')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            voice._diagnose('turn-complete', RuntimeError('voice-event'))
+        log = output.getvalue()
+        self.assertRegex(log, r'event=unknown@consume:\d+')
+        self.assertNotIn('credential-test', log)
+        first = voice.events.rejection
+        with self.assertRaisesRegex(RuntimeError, 'voice-event'):
+            voice.events.consume('{}', 'primary')
+        self.assertEqual(voice.events.rejection, first)
+        self.assertFalse(voice.events.complete)
+        await voice.close()
 
     async def test_actual_handler_preserves_one_safe_handshake_cause(self):
         for mode, cause in (('handler-os-error', 'os-error'), ('handler-timeout', 'timeout'),

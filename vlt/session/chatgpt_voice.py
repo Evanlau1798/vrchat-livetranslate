@@ -221,9 +221,10 @@ class NativeVoice:
                      'handshake' if isinstance(error, InvalidStatus) else
                      'websocket' if isinstance(error, ConnectionClosed) else
                      'os-error' if isinstance(error, OSError) else 'unexpected')
+        detail = f' event={self.events.rejection}' if self.events.rejection is not None else ''
         print(f'[subscription-voice] rejected: phase={phase} cause={cause} '
               f'started={len(self.events.started)} done={len(self.events.done)} '
-              f'closed={len(self.events.closed)}', flush=True)
+              f'closed={len(self.events.closed)}{detail}', flush=True)
 
     async def generate(self, text, target):
         phase = 'browser-start'
