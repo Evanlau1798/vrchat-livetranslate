@@ -24,6 +24,10 @@ class _HTTPFailure(RuntimeError):
     pass
 
 
+class _RequestNotSent(_HTTPFailure):
+    request_sent = False
+
+
 _TOKEN = rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
 _QUOTED = rb'"(?:[\t \x21\x23-\x5b\x5d-\x7e\x80-\xff]|\\[\t \x21-\x7e\x80-\xff])*"'
 _CHUNK = re.compile(rb'([0-9A-Fa-f]+)(?:[ \t]*;[ \t]*' + _TOKEN +
@@ -143,7 +147,10 @@ def request(operation, body, headers):
     host, path, limit, body_limit = _OPERATIONS[operation]
     if len(body) > body_limit:
         raise RuntimeError('request-invalid')
-    connection = http.client.HTTPSConnection(host, timeout=35, context=tls_context())
+    try:
+        connection = http.client.HTTPSConnection(host, timeout=35, context=tls_context())
+    except Exception:
+        raise _RequestNotSent('http-uncertain') from None
     connection.response_class = _Response
     deadline = time.monotonic() + 35
     connection._create_connection = lambda *args, **kwargs: _connect(host, deadline)
@@ -163,15 +170,18 @@ def request(operation, body, headers):
 
     timer = threading.Timer(35, abort)
     timer.daemon = True
-    timer.start()
     response = None
     failed = False
+    post_started = False
     try:
+        timer.start()
         connection.timeout = _remaining(deadline)
         connection.connect()
         transport = connection.sock
         transport_ref[0] = transport
         transport.settimeout(_remaining(deadline))
+        # Once request starts, even a partial send has an unknown remote outcome.
+        post_started = True
         connection.request('POST', path, body=body, headers=headers)
         transport.settimeout(_remaining(deadline))
         response = connection.getresponse()
@@ -215,12 +225,14 @@ def request(operation, body, headers):
             raw.extend(block)
             if len(raw) > limit:
                 raise _HTTPFailure('http-size')
-    except _HTTPFailure:
+    except _HTTPFailure as exc:
         failed = True
+        if not post_started:
+            raise _RequestNotSent(str(exc)) from None
         raise
     except Exception:
         failed = True
-        raise RuntimeError('http-uncertain') from None
+        raise (RuntimeError if post_started else _RequestNotSent)('http-uncertain') from None
     finally:
         timer.cancel()
         cleanup_failed = False

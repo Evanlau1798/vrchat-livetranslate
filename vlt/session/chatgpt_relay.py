@@ -8,7 +8,7 @@ import uuid
 import wave
 
 from .chatgpt_events import bounded_json, response_text
-from .chatgpt_http import request
+from .chatgpt_http import _RequestNotSent, request
 from ..ui_text import SOURCE_LANGS, TARGET_LANGS
 
 # Protocol references: codex-asr 479f6a7a3db81fe2a23d4755b0ccbeb4400317d4;
@@ -248,6 +248,8 @@ class SubscriptionRelay:
             raw = task.result()
         except _Stale:
             raise RuntimeError(prefix + '-stale') from None
+        except _RequestNotSent:
+            raise _RequestNotSent(prefix + '-request') from None
         except Exception:
             raise RuntimeError(prefix + '-request') from None
         self.owner.require_usable()
