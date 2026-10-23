@@ -125,6 +125,7 @@ class Coordinator:
         self._ready = {k: deque() for k in configs}
         self._output_space = {k: asyncio.Event() for k in configs}
         self._active = {}
+        self._lookahead = {}
         self._owned = set()
         self._segmenters = {k: Segmenter() for k in configs}
         self._input_context = self._context()
@@ -152,12 +153,18 @@ class Coordinator:
                 raise _Rejected('direction-audio-disabled')
             section = _Section(direction, segment_id, self._epoch, self._account_generation(),
                                policy, pcm, _hash(pcm))
+            orphan = self._lookahead.get(direction)
+            if direction not in self._active and orphan is not None:
+                if not orphan[1].done():
+                    raise _Rejected('direction-resetting')
+                self._lookahead.pop(direction)
             if direction in self._active:
                 if self._active[direction].cancelling():
                     raise _Rejected('direction-resetting')
                 if len(self._pending[direction]) >= 2:
                     raise _Rejected('queue-overload')
                 self._pending[direction].append(section)
+                self._prefetch_next(direction)
             else:
                 task = asyncio.create_task(self._worker(section))
                 self._active[direction] = task
@@ -172,8 +179,21 @@ class Coordinator:
 
     def _finished(self, direction, task):
         self._owned.discard(task)
+        if not task.cancelled():
+            task.exception()
         if self._active.get(direction) is task:
             self._active.pop(direction, None)
+        orphan = self._lookahead.get(direction)
+        if direction not in self._active and orphan is not None and orphan[1].done():
+            self._lookahead.pop(direction)
+
+    def _prefetch_next(self, direction):
+        if self._pending[direction] and direction not in self._lookahead:
+            section = self._pending[direction][0]
+            task = asyncio.create_task(self._process(section))
+            self._lookahead[direction] = section, task
+            self._owned.add(task)
+            task.add_done_callback(lambda done: self._finished(direction, done))
 
     def _valid(self, section):
         try:
@@ -266,10 +286,11 @@ class Coordinator:
 
     async def _worker(self, section):
         direction = section.direction
+        job = None
         try:
             while section is not None:
                 try:
-                    approval = await self._process(section)
+                    approval = await self._process(section) if job is None else await job
                     if not self._valid(section):
                         raise _Rejected('stale-result')
                     while len(self._ready[direction]) >= 2:
@@ -287,8 +308,27 @@ class Coordinator:
                 if self._active.get(direction) is not asyncio.current_task():
                     return
                 section = self._pending[direction].popleft() if self._pending[direction] else None
+                prefetched = self._lookahead.get(direction)
+                job = None
+                if prefetched is not None and prefetched[0] is section:
+                    job = self._lookahead.pop(direction)[1]
+                if section is not None:
+                    self._prefetch_next(direction)
         finally:
             if self._active.get(direction) is asyncio.current_task():
+                prefetched = self._lookahead.pop(direction, None)
+                jobs = [task for task in (job, prefetched[1] if prefetched else None) if task is not None]
+                for task in jobs:
+                    if not task.cancelling():
+                        task.cancel()
+                joined = asyncio.gather(*jobs, return_exceptions=True)
+                while not joined.done():
+                    try:
+                        await asyncio.shield(joined)
+                    except asyncio.CancelledError:
+                        pass
+                joined.result()
+                self._pending[direction].clear()
                 self._active.pop(direction, None)
 
     def consume(self, direction, on_text, on_audio, can_output=None):
@@ -349,6 +389,9 @@ class Coordinator:
             segmenter.reset()
         for task in self._active.values():
             task.cancel()
+        for _, task in self._lookahead.values():
+            if not task.cancelling():
+                task.cancel()
         for queues in (self._pending, self._ready):
             for queue in queues.values():
                 queue.clear()
