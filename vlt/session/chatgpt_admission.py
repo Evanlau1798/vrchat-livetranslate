@@ -63,6 +63,14 @@ class Admission:
     def accepts(self, approval):
         return isinstance(approval, _Approved) and approval.gate is self and self.valid()
 
+    def consume(self, pipeline, direction, on_text, on_audio):
+        with self.engine._sink_lock:
+            return pipeline.consume(direction, on_text, on_audio, self._can_output)
+
+    def _can_output(self, mono_bytes):
+        ready = getattr(self.engine._virtualmic, 'can_accept_complete', None)
+        return ready is None or ready(mono_bytes * 4)
+
     def wrap(self, callback):
         def emit(value):
             segment = current()

@@ -123,6 +123,7 @@ class Coordinator:
         self._closed = False
         self._pending = {k: deque() for k in configs}
         self._ready = {k: deque() for k in configs}
+        self._output_space = {k: asyncio.Event() for k in configs}
         self._active = {}
         self._owned = set()
         self._segmenters = {k: Segmenter() for k in configs}
@@ -271,8 +272,11 @@ class Coordinator:
                     approval = await self._process(section)
                     if not self._valid(section):
                         raise _Rejected('stale-result')
-                    if len(self._ready[direction]) >= 2:
-                        raise _Rejected('output-overload')
+                    while len(self._ready[direction]) >= 2:
+                        self._output_space[direction].clear()
+                        await self._output_space[direction].wait()
+                    if not self._valid(section):
+                        raise _Rejected('stale-result')
                     self._ready[direction].append(approval)
                 except _Rejected as exc:
                     self._reason(direction, section.segment_id, str(exc))
@@ -287,16 +291,25 @@ class Coordinator:
             if self._active.get(direction) is asyncio.current_task():
                 self._active.pop(direction, None)
 
-    def consume(self, direction, on_text, on_audio):
+    def consume(self, direction, on_text, on_audio, can_output=None):
         if direction not in self._ready or not self._ready[direction]:
             return False
-        approval = self._ready[direction].popleft()
+        approval = self._ready[direction][0]
         section = approval.section
         if (not self._valid(section) or approval.verifier_version != _VERIFIER_VERSION
                 or _hash(approval.pcm) != approval.audio_hash
                 or _hash(approval.translation.encode()) != approval.text_hash):
+            self._ready[direction].popleft()
+            self._output_space[direction].set()
             self._reason(direction, section.segment_id, 'stale-result')
             return False
+        if approval.pcm and can_output is not None and not can_output(len(approval.pcm)):
+            return False
+        if (not self._valid(section) or not self._ready[direction]
+                or self._ready[direction][0] is not approval):
+            return False
+        self._ready[direction].popleft()
+        self._output_space[direction].set()
         source, text = approval.source, approval.translation
         if section.policy[0] == 'zh' or section.policy[1] == 'zh':
             from opencc import OpenCC

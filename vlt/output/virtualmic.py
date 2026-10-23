@@ -169,6 +169,13 @@ class VirtualMic:
             self._dropping_sentence = False
         self._primed = False
 
+    def can_accept_complete(self, stereo_bytes: int) -> bool:
+        if type(stereo_bytes) is not int or not 0 < stereo_bytes <= 17_280_000 or stereo_bytes % 4:
+            return False
+        with self._lock:
+            self._discard_invalid()
+            return not self._buf or self._buf_bytes + stereo_bytes <= int(self._max_buffer_ms * self._bytes_per_ms)
+
     def push(self, pcm_48k_stereo: bytes) -> None:
         """推入已重采样的 48kHz 立体声 PCM。
 

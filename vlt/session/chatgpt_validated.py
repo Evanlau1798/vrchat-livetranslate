@@ -86,7 +86,12 @@ class ChatGPTValidatedSession(LiveTranslateSession):
         if not self._usable():
             return
         try:
-            if self._pipeline.consume(self._direction, self.on_text, self.on_audio):
+            admission = getattr(self, '_engine_admission', None)
+            if admission is None:
+                consumed = self._pipeline.consume(self._direction, self.on_text, self.on_audio)
+            else:
+                consumed = admission.consume(self._pipeline, self._direction, self.on_text, self.on_audio)
+            if consumed:
                 self._finalized += 1
         except Exception:
             self.abort('session-output')

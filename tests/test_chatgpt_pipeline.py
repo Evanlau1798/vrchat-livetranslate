@@ -250,11 +250,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_output_queue_is_bounded_without_a_consumer(self):
         for _ in range(3):
             self.assertTrue(self.pipeline.submit('mine', bytes(320)))
-        await asyncio.gather(*tuple(self.pipeline._owned))
+        await self.settle()
         self.assertEqual(len(self.pipeline._ready['mine']), 2)
-        self.assertIn('output-overload', [call.args[2] for call in self.reasons.call_args_list])
+        self.assertNotIn('output-overload', [call.args[2] for call in self.reasons.call_args_list],
+                         'an admitted and approved section must wait for output capacity')
+        self.assertTrue(self.consume())
+        await self.settle()
+        self.assertEqual(len(self.pipeline._ready['mine']), 2)
         self.assertTrue(self.consume())
         self.assertTrue(self.consume())
+        self.assertEqual(len(self.text), 3)
         self.assertFalse(self.consume())
 
     async def test_old_queued_results_account_and_language_changes_are_dropped(self):

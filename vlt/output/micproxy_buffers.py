@@ -121,6 +121,13 @@ class TranslatedSink:
     def mic_reference_db(self) -> float | None:
         return self._p.mic_reference_db
 
+    def can_accept_complete(self, stereo_bytes: int) -> bool:
+        with self._p._state_lock:
+            if self._p._mode != 'translated':
+                return True
+            buf = self._p._translated
+            return buf is not None and buf.can_accept_complete(stereo_bytes)
+
     def push(self, pcm_48k_stereo: bytes) -> None:
         buf = self._p._translated
         if buf is not None:
