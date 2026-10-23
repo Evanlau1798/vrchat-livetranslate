@@ -1,5 +1,6 @@
 """Python 訂閱轉錄、翻譯與校驗；服務門檻通過前不接正式 session。"""
 import asyncio
+from contextlib import asynccontextmanager
 import io
 import json
 import threading
@@ -94,6 +95,19 @@ class SubscriptionRelay:
     async def synthesize(self, text, target):
         from .chatgpt_voice import NativeVoice
         return await NativeVoice(self).generate(text, target)
+
+    @asynccontextmanager
+    async def prepare_voice(self):
+        from .chatgpt_voice import NativeVoice
+        voice = NativeVoice(self)
+        try:
+            try:
+                voice.prepare()
+            except Exception:
+                voice._fail()
+            yield voice.generate
+        finally:
+            await voice.close()
 
     async def translate(self, source, target, vocabulary):
         if (not isinstance(vocabulary, dict)

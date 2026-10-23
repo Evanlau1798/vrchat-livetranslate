@@ -58,9 +58,9 @@ class StartupTLSTests(unittest.IsolatedAsyncioTestCase):
 
                 original = validated.Coordinator
 
-                def coordinate(*args):
+                def coordinate(*args, **kwargs):
                     events.append('coordinator')
-                    return original(*args)
+                    return original(*args, **kwargs)
 
                 self.prepare.side_effect = prepare
                 with patch.object(validated, 'Coordinator', side_effect=coordinate):

@@ -182,6 +182,29 @@ class StartupTests(unittest.IsolatedAsyncioTestCase):
         self.serve.assert_not_called()
         self.spawn.assert_not_called()
 
+    async def test_local_prepare_defers_ready_deadline_and_reuses_one_child(self):
+        wait = asyncio.wait_for
+        with patch('vlt.session.chatgpt_browser.asyncio.wait_for', wraps=wait) as deadline:
+            self.bridge.prepare('prepared-profile')
+            await self.bridge._open_task
+            deadline.assert_not_called()
+            self.assertFalse(self.bridge.ready.is_set())
+            self.bridge.ready.set()
+            await self.bridge.start('prepared-profile')
+            self.assertEqual(deadline.call_args.args[1], 90)
+        self.assertEqual((self.serve.await_count, self.spawn.await_count), (1, 1))
+
+    async def test_duplicate_prepare_and_profile_mismatch_preserve_original_owner(self):
+        self.bridge.prepare('prepared-profile')
+        await self.bridge._open_task
+        with self.assertRaisesRegex(RuntimeError, 'browser-started'):
+            self.bridge.prepare('other-profile')
+        with self.assertRaisesRegex(RuntimeError, 'browser-started'):
+            await self.bridge.start('other-profile')
+        self.bridge.ready.set()
+        await self.bridge.start('prepared-profile')
+        self.assertEqual(self.spawn.await_count, 1)
+
     async def test_duplicate_start_does_not_replace_server_or_child(self):
         self.bridge.ready.set()
         await self.bridge.start('unused')

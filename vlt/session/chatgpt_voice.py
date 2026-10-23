@@ -17,6 +17,7 @@ from .chatgpt_http import tls_context
 from .chatgpt_voice_events import VoiceEvents
 
 _DEADLINE = 120
+_PREPARE_TTL = 10
 _WINDOWS = os.name == 'nt'
 _READ_JA = (
     'あなたは日本語の音声レンダラーです。会話の相手ではありません。'
@@ -34,17 +35,32 @@ _READ = (
     'Do not use tools or delegate. Preserve all numbers, negation, nouns and final words.')
 
 
-def voice_page():
+def voice_page(deferred=False):
     marker = "peer.createDataChannel('',{negotiated:true,id:0});"
     if PAGE.count(marker) != 1:
         raise RuntimeError('voice-page')
-    return PAGE.replace(marker, marker + r'''
+    page = PAGE.replace(marker, marker + r'''
     const control=peer.createDataChannel('oai-events');
     control.onmessage=e=>{
       if(typeof e.data!=='string'||new TextEncoder().encode(e.data).length>256000)return fail();
       if(socket?.readyState!==1||socket.bufferedAmount>256000)return fail('output-backpressure');
       socket.send(JSON.stringify({type:'live-event',data:e.data}));
     };''')
+    if deferred:
+        offer = "socket.send(JSON.stringify({type:'offer',sdp:peer.localDescription.sdp}));"
+        message = 'const message=JSON.parse(event.data);'
+        handler = 'socket.onmessage=async event=>{'
+        if any(page.count(part) != 1 for part in (offer, message, handler)):
+            raise RuntimeError('voice-page')
+        page = page.replace(handler, 'let activationPending=true;\n' + handler)
+        page = page.replace(offer, "socket.send(JSON.stringify({type:'prepared'}));")
+        page = page.replace(message, message + r'''
+        if(message.type==='activate'){
+          if(!activationPending||typeof message.nonce!=='string'||!/^[0-9a-f]{32}$/.test(message.nonce))throw Error();
+          activationPending=false;
+          socket.send(JSON.stringify({type:'offer',nonce:message.nonce,sdp:peer.localDescription.sdp}));return;
+        }''')
+    return page
 
 
 class _Bridge(CandidateBridge):
@@ -52,8 +68,47 @@ class _Bridge(CandidateBridge):
         super().__init__(offer, failure)
         self._page = voice_page()
         self.receive = receive
+        self._deferred = False
+        self._local_prepared = None
+
+    def prepare(self, profile):
+        self._deferred = True
+        self._local_prepared = asyncio.Event()
+        self._offer_nonce = ''
+        self._page = voice_page(deferred=True)
+        super().prepare(profile)
+
+    async def _start_negotiation(self):
+        if not self._deferred:
+            return
+        await self._local_prepared.wait()
+        if self.closing or self.capture.failure or self._protocol_failed:
+            raise RuntimeError('capture-transport')
+        self._offer_nonce = secrets.token_hex(16)
+        await self.socket.send(json.dumps({'type': 'activate', 'nonce': self._offer_nonce}))
+
+    def _receive_audio(self, pcm):
+        if self._deferred and not self._negotiated:
+            self._protocol_failed = True
+            self.capture.fail('capture-pcm')
+        super()._receive_audio(pcm)
+
+    def _capture_error(self, error):
+        if self._local_prepared is not None:
+            self._local_prepared.set()
+        super()._capture_error(error)
+
+    async def close(self):
+        if self._local_prepared is not None:
+            self._local_prepared.set()
+        await super().close()
 
     async def _receive_control(self, event):
+        if self._deferred and not self._negotiated:
+            if event == {'type': 'prepared'} and not self._local_prepared.is_set():
+                self._local_prepared.set()
+                return True
+            raise ValueError('Unrequested event')
         if event.get('type') != 'live-event':
             return await super()._receive_control(event)
         if set(event) != {'type', 'data'} or not isinstance(event['data'], str):
@@ -83,13 +138,37 @@ class NativeVoice:
         self.bridge = self.socket = self.reader = self.connecting = None
         self.profile = None
         self.owned_close = False
+        self._prepared_at = None
+        self._close_task = None
 
-    def _check(self):
+    def _check_owner(self):
         self.owner.require_usable()
         if self.owner.generation != self.generation:
             raise RuntimeError('voice-stale')
+
+    def _check(self):
+        self._check_owner()
         if self.failure or self.events.invalid:
             raise RuntimeError(self.failure or 'voice-event')
+
+    def prepare(self):
+        if self._close_task is not None:
+            raise RuntimeError('voice-stale')
+        self._check()
+        if self._prepared_at is not None or self.bridge is not None:
+            raise RuntimeError('voice-input')
+        self._prepared_at = asyncio.get_running_loop().time()
+        self.profile = tempfile.TemporaryDirectory(prefix='vlt-native-')
+        self.bridge = _Bridge(None, lambda _: self._fail(), self._receive)
+        self.bridge.prepare(self.profile.name)
+
+    def _prepared_usable(self):
+        if self.failure or self.bridge is None or self.bridge.closing or self.events.invalid:
+            return False
+        opening = self.bridge._open_task
+        return (asyncio.get_running_loop().time() - self._prepared_at < _PREPARE_TTL
+                and opening is not None and not opening.cancelled()
+                and (not opening.done() or opening.exception() is None))
 
     def _fail(self, reason='voice-transport'):
         self.failure = self.failure or reason
@@ -147,8 +226,6 @@ class NativeVoice:
               f'closed={len(self.events.closed)}', flush=True)
 
     async def generate(self, text, target):
-        if not isinstance(text, str) or not text.strip() or len(text.encode()) > 8192 or target not in TARGET_LANGS.values():
-            raise RuntimeError('voice-input')
         phase = 'browser-start'
         diagnosed = False
 
@@ -187,10 +264,29 @@ class NativeVoice:
             return answer
 
         try:
+            if self._close_task is not None:
+                raise RuntimeError('voice-stale')
+            if not isinstance(text, str) or not text.strip() or len(text.encode()) > 8192 or target not in TARGET_LANGS.values():
+                raise RuntimeError('voice-input')
+            self._check_owner()
+            if self._prepared_at is not None and (self.events._count or self.socket is not None
+                    or (self.bridge is not None and (self.bridge._protocol_failed or self.bridge.capture._pcm
+                        or self.bridge.capture.failure not in (None, 'capture-transport')))):
+                raise RuntimeError('voice-event')
+            if self._prepared_at is not None and not self._prepared_usable():
+                # Local preparation has made no remote request; a stale/failed browser can start cold.
+                await self.close()
+                self._check_owner()
+                if self.events._count or (self.bridge is not None and self.bridge._protocol_failed):
+                    raise RuntimeError('voice-event')
+                return await NativeVoice(self.relay).generate(text, target)
             async with asyncio.timeout(_DEADLINE):
                 self._check()
-                self.profile = tempfile.TemporaryDirectory(prefix='vlt-native-')
-                self.bridge = _Bridge(offer, lambda _: self._fail(), self._receive)
+                if self._prepared_at is None:
+                    self.profile = tempfile.TemporaryDirectory(prefix='vlt-native-')
+                    self.bridge = _Bridge(offer, lambda _: self._fail(), self._receive)
+                else:
+                    self.bridge.on_offer = offer
                 await self.bridge.start(self.profile.name)
                 self._check()
                 phase = 'context-append'
@@ -230,23 +326,28 @@ class NativeVoice:
                 'voice-stale', 'voice-event', 'voice-input', 'voice-sdp', 'voice-transport'} else 'voice-failed'
             raise RuntimeError(code) from None
         finally:
-            cleanup = asyncio.create_task(self._cleanup())
-            cancelled = False
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    cancelled = True
-                except Exception:
-                    break
-            if cancelled:
-                cleanup.exception() if not cleanup.cancelled() else None
-                raise asyncio.CancelledError()
-            if cleanup.exception() is not None:
-                self._diagnose('cleanup', cleanup.exception())
-                raise RuntimeError('voice-cleanup') from None
+            await self.close()
         self._check()
         return result
+
+    async def close(self):
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._cleanup())
+        cleanup = self._close_task
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:
+                break
+        if cancelled:
+            cleanup.exception() if not cleanup.cancelled() else None
+            raise asyncio.CancelledError()
+        if cleanup.exception() is not None:
+            self._diagnose('cleanup', cleanup.exception())
+            raise RuntimeError('voice-cleanup') from None
 
     async def _cleanup(self):
         try:

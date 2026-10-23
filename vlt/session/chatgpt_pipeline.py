@@ -108,7 +108,7 @@ class Coordinator:
             return 0
         return int(self.submit(direction, section.pcm))
 
-    def __init__(self, configs, services, on_reason, account_generation, context_valid=None):
+    def __init__(self, configs, services, on_reason, account_generation, context_valid=None, prepare_voice=None):
         if not configs or any(k not in ('mine', 'theirs') for k in configs):
             raise ValueError('direction-invalid')
         if any(cfg.provider != 'chatgpt' for cfg in configs.values()):
@@ -118,6 +118,7 @@ class Coordinator:
         self._on_reason = on_reason
         self._account_generation = account_generation
         self._context_valid = context_valid
+        self._prepare_voice = prepare_voice
         self._epoch = 0
         self._closed = False
         self._pending = {k: deque() for k in configs}
@@ -233,13 +234,21 @@ class Coordinator:
                 or translation['language'] != target or not _string(translation['translation'])):
             raise _Rejected('translation-invalid')
         text = translation['translation']
+        if voice and self._prepare_voice is not None:
+            async with self._prepare_voice() as synthesize:
+                return await self._render(section, source, text, synthesize)
+        return await self._render(section, source, text, None)
+
+    async def _render(self, section, source, text, synthesize):
+        _, target, voice, _ = section.policy
         checked = await self._stage(section, 'text-check', self._services.validate_text, source, text, target)
         if not _verdict(checked, target):
             raise _Rejected('text-rejected')
         pcm, candidate_id = b'', ''
         if voice:
             # synthesize 的契約須由 adapter 證明遠端完成及完整 local seal；此處不能用靜默猜測。
-            candidate = await self._stage(section, 'voice', self._services.synthesize, text, target)
+            candidate = await self._stage(section, 'voice',
+                self._services.synthesize if synthesize is None else synthesize, text, target)
             if (not isinstance(candidate, tuple) or len(candidate) != 2
                     or not isinstance(candidate[0], str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}', candidate[0])
                     or not isinstance(candidate[1], bytes) or not candidate[1] or len(candidate[1]) % 2

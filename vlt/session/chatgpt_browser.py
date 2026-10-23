@@ -7,6 +7,7 @@ import os
 import secrets
 import shutil
 from pathlib import Path
+from websockets.exceptions import ConnectionClosed
 
 from .chatgpt_browser_page import PAGE
 
@@ -45,6 +46,11 @@ class BrowserBridge:
         self._send_failed = False
         self._close_task = None
         self._open_task = None
+        self._starting = False
+        self._profile = None
+        self._protocol_failed = False
+        self._offer_nonce = None
+        self._negotiated = False
         self._page = None
 
     async def _http(self, connection, request):
@@ -68,7 +74,6 @@ class BrowserBridge:
             return
         self.socket = socket
         self.handler = asyncio.current_task()
-        negotiated = False
         failure = '背景 WebRTC 音訊橋接已關閉。'
         try:
             async for message in socket:
@@ -79,13 +84,15 @@ class BrowserBridge:
                     continue
                 event = json.loads(message)
                 if event.get('type') == 'offer':
-                    if negotiated or not isinstance(event.get('sdp'), str) or not event['sdp'].startswith('v=0'):
+                    if self._negotiated or not isinstance(event.get('sdp'), str) or not event['sdp'].startswith('v=0'):
                         raise ValueError('Duplicate offer')
-                    negotiated = True
+                    if self._offer_nonce is not None and (not self._offer_nonce or event.get('nonce') != self._offer_nonce):
+                        raise ValueError('Unrequested offer')
+                    self._negotiated = True
                     answer = await self.on_offer(event['sdp'])
                     await socket.send(json.dumps({'type': 'answer', 'sdp': answer}))
                 elif event.get('type') == 'ready':
-                    if not negotiated:
+                    if not self._negotiated:
                         raise ValueError('Missing offer')
                     self.ready.set()
                 elif event.get('type') == 'error':
@@ -102,8 +109,11 @@ class BrowserBridge:
                     self._drained.set()
                 elif not await self._receive_control(event):
                     raise ValueError('Unexpected control event')
-        except Exception:
+        except Exception as error:
             if failure == '背景 WebRTC 音訊橋接已關閉。':
+                self._protocol_failed = (not isinstance(error, ConnectionClosed)
+                    or any(frame is not None and frame.code not in (1000, 1001, 1005, 1006, 1011, 1012, 1013)
+                           for frame in (error.rcvd, error.sent)))
                 failure = '背景 WebRTC 音訊橋接失敗。'
         finally:
             self._send_failed = True
@@ -118,12 +128,29 @@ class BrowserBridge:
     async def _receive_control(self, event):
         return False
 
-    async def start(self, profile):
+    async def _start_negotiation(self):
+        pass
+
+    async def _wait_ready(self):
+        await self._start_negotiation()
+        await self.ready.wait()
+
+    def prepare(self, profile):
         if self.closing:
             raise RuntimeError('browser-closed')
         if self._open_task is not None or self.server is not None or self.process is not None:
             raise RuntimeError('browser-started')
+        self._profile = profile
         self._open_task = asyncio.create_task(self._open(profile))
+
+    async def start(self, profile):
+        if self.closing:
+            raise RuntimeError('browser-closed')
+        if self._starting or (self._open_task is not None and self._profile != profile):
+            raise RuntimeError('browser-started')
+        self._starting = True
+        if self._open_task is None:
+            self.prepare(profile)
         cancelled = False
         while not self._open_task.done():
             try:
@@ -139,7 +166,7 @@ class BrowserBridge:
             raise asyncio.CancelledError()
         try:
             self._open_task.result()
-            await asyncio.wait_for(self.ready.wait(), 90)  # 40s request + 30s SDP + peer setup.
+            await asyncio.wait_for(self._wait_ready(), 90)  # 40s request + 30s SDP + peer setup.
             if self.closing:
                 raise RuntimeError('browser-closed')
         except BaseException:

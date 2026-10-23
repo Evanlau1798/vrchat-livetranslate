@@ -44,10 +44,12 @@ class ChatGPTValidatedSession(LiveTranslateSession):
             if admission is not None and not admission.valid():
                 failure = 'session-context'
                 raise RuntimeError('session-context')
+            relay = chatgpt_relay.SubscriptionRelay(self._owner)
             self._pipeline = Coordinator({self._direction: self.cfg},
-                chatgpt_relay.SubscriptionRelay(self._owner), self._reason,
+                relay, self._reason,
                 lambda: self._owner.generation,
-                lambda _: admission is None or admission.valid())
+                lambda _: admission is None or admission.valid(),
+                prepare_voice=getattr(relay, 'prepare_voice', None))
             self._alive = True
         except BaseException as error:
             self._failure = failure
