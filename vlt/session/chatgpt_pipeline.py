@@ -231,10 +231,17 @@ class Coordinator:
         return result
 
     async def _process(self, section):
-        source_lang, target, voice, vocabulary = section.policy
+        source_lang, target, voice, _ = section.policy
         source = await self._stage(section, 'source-asr', self._services.source_asr, section.pcm, source_lang)
         if not _string(source):
             raise _Rejected('source-invalid')
+        if voice and self._prepare_voice is not None:
+            async with self._prepare_voice(target) as prepared:
+                return await self._translate_and_render(section, source, prepared)
+        return await self._translate_and_render(section, source, None)
+
+    async def _translate_and_render(self, section, source, prepared):
+        source_lang, target, _, vocabulary = section.policy
         terms = json.loads(vocabulary)
         use_terms = bool(terms)
         if source_lang == target and terms:
@@ -255,10 +262,7 @@ class Coordinator:
                 or translation['language'] != target or not _string(translation['translation'])):
             raise _Rejected('translation-invalid')
         text = translation['translation']
-        if voice and self._prepare_voice is not None:
-            async with self._prepare_voice() as synthesize:
-                return await self._render(section, source, text, synthesize)
-        return await self._render(section, source, text, None)
+        return await self._render(section, source, text, prepared)
 
     async def _render(self, section, source, text, synthesize):
         _, target, voice, _ = section.policy
@@ -267,9 +271,16 @@ class Coordinator:
             raise _Rejected('text-rejected')
         pcm, candidate_id = b'', ''
         if voice:
+            if synthesize is not None:
+                try:
+                    await synthesize.activate()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    raise _Rejected('voice-failed') from None
             # synthesize 的契約須由 adapter 證明遠端完成及完整 local seal；此處不能用靜默猜測。
             candidate = await self._stage(section, 'voice',
-                self._services.synthesize if synthesize is None else synthesize, text, target)
+                self._services.synthesize if synthesize is None else synthesize.generate, text, target)
             if (not isinstance(candidate, tuple) or len(candidate) != 2
                     or not isinstance(candidate[0], str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}', candidate[0])
                     or not isinstance(candidate[1], bytes) or not candidate[1] or len(candidate[1]) % 2

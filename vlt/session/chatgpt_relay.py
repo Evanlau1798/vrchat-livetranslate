@@ -102,7 +102,15 @@ class SubscriptionRelay:
         return await NativeVoice(self).generate(text, target)
 
     @asynccontextmanager
-    async def prepare_voice(self):
+    async def prepare_voice(self, target=None):
+        if target is not None:
+            from .chatgpt_reservation import VoiceReservation
+            prepared = VoiceReservation(self, target)
+            try:
+                yield prepared
+            finally:
+                await prepared.close()
+            return
         from .chatgpt_voice import NativeVoice
         voice = NativeVoice(self)
         try:

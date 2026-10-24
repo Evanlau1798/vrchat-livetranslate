@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 from types import SimpleNamespace
+from websockets.protocol import State
 
 TEXT = '明日九時に会いましょう。'
 PCM = b'\x01\x00' * 480
@@ -44,12 +45,22 @@ class NativeFixture:
         self.profile = None
         self.connect_args = None
 
+    @property
+    def state(self):
+        return State.CLOSED if self.closed else State.OPEN
+
     async def start(self, bridge, profile):
-        self.profile = profile
-        self.bridge = bridge
+        self.profile, self.bridge = profile, bridge
         self.steps.append('browser-start')
         answer = await bridge.on_offer('v=0\r\n')
         assert answer.startswith('v=0')
+        await self.deliver_answer(bridge, profile)
+
+    async def deliver_answer(self, bridge, profile, nonce=None):
+        self.profile = profile
+        self.bridge = bridge
+        if nonce is not None:
+            await bridge._receive_control(dict(type='generation',nonce=nonce))
         bridge.socket = SimpleNamespace(send=self.local_send)
         bridge._receive_audio(PCM)
         for event in self.primary[:1]:
@@ -105,7 +116,8 @@ class NativeFixture:
             return
         assert event['type'] == 'session.close'
         self.steps.append('native-close')
-        await self.bridge._receive_control(dict(type='live-event', data=wire(self.closed_event).decode()))
+        if self.bridge is not None:
+            await self.bridge._receive_control(dict(type='live-event', data=wire(self.closed_event).decode()))
         self.queue.put_nowait(wire(self.closed_event))
 
     async def close(self):

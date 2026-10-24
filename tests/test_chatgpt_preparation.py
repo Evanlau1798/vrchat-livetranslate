@@ -12,6 +12,14 @@ from vlt.session.base import SessionConfig
 from vlt.session.chatgpt_validated import ChatGPTValidatedSession
 
 
+class Prepared:
+    def __init__(self, generate, activate):
+        self.generate, self.activate = generate, activate
+
+    async def __call__(self, *args):
+        return await self.generate(*args)
+
+
 class SessionPreparationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.events, self.text, self.audio = [], [], []
@@ -21,12 +29,20 @@ class SessionPreparationTests(unittest.IsolatedAsyncioTestCase):
                             negation=True, complete=True, extra_content=False)
         self.synthesize = AsyncMock(return_value=('prepared', b'\x01\x00' * 480))
         self.cleanup_wait = None
+        self.activation_wait = None
+        self.prepared_targets = []
+
+        async def activate():
+            self.events.append('activate')
+            if self.activation_wait is not None:
+                await self.activation_wait.wait()
 
         @asynccontextmanager
-        async def preparation():
+        async def preparation(*targets):
             self.events.append('prepare')
+            self.prepared_targets.append(targets)
             try:
-                yield self.synthesize
+                yield Prepared(self.synthesize, activate)
             finally:
                 self.events.append('cleanup')
                 if self.cleanup_wait is not None:
@@ -157,7 +173,7 @@ class SessionPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.events.count('prepare'), 2)
         self.assertEqual(self.events.count('closed'), 2)
 
-    async def test_source_failure_and_invalid_translation_do_not_launch_unused_preparation(self):
+    async def test_source_failure_skips_prepare_and_invalid_translation_closes_it_without_speech(self):
         self.services.source_asr.side_effect = RuntimeError('asr-empty')
         session = await self.start()
         await self.feed(session)
@@ -167,8 +183,37 @@ class SessionPreparationTests(unittest.IsolatedAsyncioTestCase):
         self.services.source_asr.return_value = '明天九點見。'
         self.services.translate.return_value = {'translation': '', 'language': 'ja'}
         await self.feed(session)
-        self.assertEqual(self.events, [])
+        self.assertEqual(self.events, ['prepare', 'cleanup', 'closed'])
+        self.synthesize.assert_not_awaited()
+        self.services.audio_asr.assert_not_awaited()
         self.assertEqual(session.diagnostics()['last_reason'], 'translation-invalid')
+
+    async def test_prepares_only_fixed_target_while_translation_is_pending(self):
+        pending = asyncio.get_running_loop().create_future()
+        async def translate(*_):
+            return await pending
+        self.services.translate.side_effect = translate
+        session = await self.start()
+        try:
+            await self.feed(session)
+            self.assertEqual(self.prepared_targets, [('ja',)])
+            self.assertEqual(self.events, ['source-asr', 'prepare'])
+            self.synthesize.assert_not_awaited()
+        finally:
+            pending.set_result(dict(translation='明日九時に会いましょう。', language='ja'))
+
+    async def test_activation_completes_before_timed_synthesis_or_outputs(self):
+        self.activation_wait = asyncio.Event()
+        session = await self.start()
+        await self.feed(session)
+        self.assertIn('activate', self.events)
+        self.synthesize.assert_not_awaited()
+        session.tick()
+        self.assertEqual((self.text, self.audio), ([], []))
+        self.activation_wait.set()
+        await asyncio.gather(*tuple(session._pipeline._owned))
+        session.tick()
+        self.assertEqual(self.audio, [b'\x01\x00' * 480])
 
 
 if __name__ == '__main__':

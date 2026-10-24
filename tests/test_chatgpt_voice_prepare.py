@@ -44,8 +44,15 @@ class VoicePreparationTests(unittest.IsolatedAsyncioTestCase):
             bridge.process = child
             async def activate(raw):
                 event = json.loads(raw)
+                if event['type'] == 'answer':
+                    await self.fixture.deliver_answer(bridge, profile, event['nonce'])
+                    return
                 assert event['type'] == 'activate' and event['nonce'] == bridge._offer_nonce
                 bridge._negotiated = True
+                if hasattr(bridge, '_reservation'):
+                    self.fixture.steps.append('browser-start')
+                    bridge._answering = asyncio.create_task(bridge._hold_offer('v=0\r\n'))
+                    return
                 await self.fixture.start(bridge, profile)
 
             async def negotiate():
@@ -236,7 +243,9 @@ class VoicePreparationTests(unittest.IsolatedAsyncioTestCase):
         await session.send_audio(b'\xf4\x01' * 4800)
         session.end_input_segment()
         await self.settled()
-        self.assertIsNone(self.fixture.offer, 'real session must hold remote work during text validation')
+        self.assertIsNotNone(self.fixture.offer, 'real session reserves a fixed target without source or script')
+        self.assertNotIn('initial_items', self.fixture.offer['session'])
+        self.assertIsNone(self.fixture.context)
         self.assertEqual(len(self.children), 1)
         pending.set_result(verdict)
         await asyncio.wait_for(asyncio.gather(*tuple(session._pipeline._owned)), 1)
@@ -253,10 +262,11 @@ class VoicePreparationTests(unittest.IsolatedAsyncioTestCase):
         self.relay.validate_audio.assert_awaited_once_with(TEXT, TEXT, 'ja')
         self.assertEqual(self.fixture.steps.count('http'), 1)
 
-    async def test_real_session_text_rejection_cleans_native_preparation_without_remote_work(self):
+    async def test_real_session_text_rejection_closes_neutral_work_without_remote_script(self):
         session, text, audio = await self.run_session(False)
         self.assertEqual((text, audio), ([], []))
-        self.assertIsNone(self.fixture.offer)
+        self.assertIsNotNone(self.fixture.offer)
+        self.assertIsNone(self.fixture.context)
         self.relay.audio_asr.assert_not_awaited()
         self.assertEqual(session.diagnostics()['last_reason'], 'text-rejected')
 
